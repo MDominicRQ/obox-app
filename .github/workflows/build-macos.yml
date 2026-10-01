@@ -11,13 +11,18 @@ permissions:
   contents: write
 
 env:
-  # Go 1.24 es la última rama compatible con macOS 11 Big Sur
+  # Go 1.24 es la última rama de Go compatible con macOS 11.
   GO_VERSION: "1.24.13"
+
+  # Evita que Go descargue automáticamente un toolchain más nuevo
+  # si alguna dependencia lo solicita.
+  GOTOOLCHAIN: "local"
 
   NODE_VERSION: "22"
 
   WAILS_VERSION: "v2.12.0"
 
+  # Big Sur 11.x en adelante.
   MACOSX_DEPLOYMENT_TARGET: "11.0"
 
   LIBUSB_VERSION: "1.0.30"
@@ -32,11 +37,13 @@ jobs:
 
       matrix:
         include:
+          # Apple Silicon
           - arch: arm64
             runner: macos-15
             platform: darwin/arm64
             artifact: epos-proxy-macos-arm64-macos11plus
 
+          # Intel
           - arch: amd64
             runner: macos-15-intel
             platform: darwin/amd64
@@ -46,14 +53,14 @@ jobs:
 
     steps:
       # ============================================================
-      # SOURCE
+      # CHECKOUT
       # ============================================================
 
       - name: Checkout
         uses: actions/checkout@v4
 
       # ============================================================
-      # TOOLCHAINS
+      # GO
       # ============================================================
 
       - name: Setup Go
@@ -62,28 +69,39 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: false
 
+      # ============================================================
+      # NODE
+      # ============================================================
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      # ============================================================
+      # BUILD TOOLS
+      # ============================================================
+
       - name: Install build tools
+        shell: bash
         run: |
+          set -euxo pipefail
+
           brew install pkg-config
 
       # ============================================================
-      # MACOS 11 COMPATIBILITY
+      # MACOS 11 GO MODULE COMPATIBILITY
       #
-      # Current upstream:
+      # Upstream actualmente utiliza:
       #
-      #   go 1.25
-      #   Fiber 3.4
-      #   x/sys 0.47
+      #   Go 1.25+
+      #   Fiber v3.4
+      #   x/sys reciente
       #
-      # cannot produce a Go application supported on macOS 11.
+      # Eso ya no es compatible con macOS 11.
       #
-      # For this compatibility build we construct a compatible
-      # go.mod using the same application source.
+      # Para nuestro build reemplazamos únicamente la resolución
+      # de dependencias. No modificamos el código de la aplicación.
       # ============================================================
 
       - name: Configure Go dependencies for macOS 11
@@ -113,15 +131,17 @@ jobs:
           go mod tidy
 
           echo
-          echo "=============================="
-          echo "Resolved Go module:"
-          echo "=============================="
+          echo "========================================"
+          echo "Resolved go.mod"
+          echo "========================================"
+
           cat go.mod
 
           echo
-          echo "=============================="
-          echo "Go version:"
-          echo "=============================="
+          echo "========================================"
+          echo "Go version"
+          echo "========================================"
+
           go version
 
       # ============================================================
@@ -141,9 +161,16 @@ jobs:
       # ============================================================
       # LIBUSB
       #
-      # Build statically so target Mac does NOT need:
+      # Compilamos libusb estáticamente.
+      #
+      # De esta forma el Mac del usuario NO necesita:
       #
       #   brew install libusb
+      #
+      # ni dependencias en:
+      #
+      #   /opt/homebrew
+      #   /usr/local
       #
       # ============================================================
 
@@ -186,14 +213,16 @@ jobs:
 
           make install
 
-          echo "PKG_CONFIG_PATH=${PREFIX}/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=${PREFIX}/lib/pkgconfig" \
+            >> "$GITHUB_ENV"
 
-          echo "CGO_ENABLED=1" >> "$GITHUB_ENV"
+          echo "CGO_ENABLED=1" \
+            >> "$GITHUB_ENV"
 
           echo "CGO_CFLAGS=-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}" \
             >> "$GITHUB_ENV"
 
-          # Security.framework es necesario para:
+          # Security.framework soluciona:
           #
           # SecTaskCreateFromSelf
           # SecTaskCopyValueForEntitlement
@@ -202,40 +231,7 @@ jobs:
             >> "$GITHUB_ENV"
 
       # ============================================================
-      # FRONTEND
-      #
-      # main.go contiene:
-      #
-      # //go:embed all:frontend/dist
-      #
-      # Por eso frontend/dist DEBE existir antes de ejecutar
-      # go test.
-      # ============================================================
-
-      - name: Build frontend
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd frontend
-
-          npm install
-
-          npm run build
-
-          cd ..
-
-          if [ ! -d frontend/dist ]; then
-            echo "ERROR: frontend/dist was not generated"
-            exit 1
-          fi
-
-          echo
-          echo "Frontend generated successfully:"
-          find frontend/dist -maxdepth 2 -type f -print
-
-      # ============================================================
-      # DIAGNOSTICS
+      # ENVIRONMENT INFO
       # ============================================================
 
       - name: Show build environment
@@ -243,59 +239,122 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "Architecture:"
+          echo
+          echo "========================================"
+          echo "Architecture"
+          echo "========================================"
+
           uname -m
 
           echo
-          echo "macOS runner:"
+          echo "========================================"
+          echo "macOS runner"
+          echo "========================================"
+
           sw_vers
 
           echo
-          echo "Go:"
+          echo "========================================"
+          echo "Go"
+          echo "========================================"
+
           go version
 
           echo
-          echo "Node:"
+          echo "========================================"
+          echo "Go toolchain policy"
+          echo "========================================"
+
+          go env GOTOOLCHAIN
+
+          echo
+          echo "========================================"
+          echo "Node"
+          echo "========================================"
+
           node --version
 
           echo
-          echo "npm:"
+          echo "========================================"
+          echo "npm"
+          echo "========================================"
+
           npm --version
 
           echo
-          echo "Wails:"
+          echo "========================================"
+          echo "Wails"
+          echo "========================================"
+
           wails version
 
           echo
-          echo "libusb:"
-          pkg-config --modversion libusb-1.0
+          echo "========================================"
+          echo "libusb"
+          echo "========================================"
 
-          echo
-          echo "libusb flags:"
+          pkg-config --modversion libusb-1.0
           pkg-config --cflags --libs libusb-1.0
 
           echo
-          echo "Deployment target:"
+          echo "========================================"
+          echo "Deployment target"
+          echo "========================================"
+
           echo "$MACOSX_DEPLOYMENT_TARGET"
 
           echo
-          echo "CGO flags:"
+          echo "========================================"
+          echo "CGO flags"
+          echo "========================================"
+
           echo "$CGO_CFLAGS"
           echo "$CGO_LDFLAGS"
 
       # ============================================================
-      # TESTS
+      # PREPARE EMBED DIRECTORY
+      #
+      # main.go contiene:
+      #
+      #   //go:embed all:frontend/dist
+      #
+      # Wails necesita poder cargar el paquete Go antes de haber
+      # compilado todavía el frontend.
+      #
+      # Por eso frontend/dist debe existir inicialmente.
       # ============================================================
 
-      - name: Run Go tests
+      - name: Prepare frontend embed directory
         shell: bash
         run: |
           set -euxo pipefail
 
-          go test -v ./...
+          mkdir -p frontend/dist
+
+          touch frontend/dist/.gitkeep
+
+          echo "Initial frontend structure:"
+
+          find frontend \
+            -maxdepth 2 \
+            -type f \
+            -print \
+            | sort
 
       # ============================================================
       # BUILD
+      #
+      # IMPORTANTE:
+      #
+      # NO ejecutamos npm run build manualmente.
+      #
+      # Wails debe generar primero:
+      #
+      #   frontend/wailsjs/go/models
+      #   frontend/wailsjs/go/main/App
+      #   frontend/wailsjs/runtime/runtime
+      #
+      # y después compilar el frontend TypeScript.
       # ============================================================
 
       - name: Build ePOS Proxy
@@ -307,10 +366,87 @@ jobs:
             --platform "${{ matrix.platform }}" \
             -clean \
             -trimpath \
-            -o epos-proxy
+            -o epos-proxy \
+            -v 2
+
+          echo
+          echo "========================================"
+          echo "Generated Wails bindings"
+          echo "========================================"
+
+          if [ -d frontend/wailsjs ]; then
+            find frontend/wailsjs \
+              -maxdepth 6 \
+              -type f \
+              -print \
+              | sort
+          else
+            echo "WARNING: frontend/wailsjs not found"
+          fi
+
+          echo
+          echo "========================================"
+          echo "Generated frontend/dist"
+          echo "========================================"
+
+          if [ -d frontend/dist ]; then
+            find frontend/dist \
+              -maxdepth 4 \
+              -type f \
+              -print \
+              | sort
+          else
+            echo "ERROR: frontend/dist does not exist"
+            exit 1
+          fi
+
+          echo
+          echo "========================================"
+          echo "Build output"
+          echo "========================================"
+
+          find build/bin \
+            -maxdepth 4 \
+            -print \
+            | sort
 
       # ============================================================
-      # FIND GENERATED APP
+      # VERIFY WAILS BINDINGS
+      # ============================================================
+
+      - name: Verify generated Wails bindings
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if [ ! -d frontend/wailsjs ]; then
+            echo "ERROR: Wails bindings were not generated"
+            exit 1
+          fi
+
+          echo "Wails bindings generated successfully."
+
+      # ============================================================
+      # GO TESTS
+      #
+      # Se ejecutan DESPUÉS del build porque main.go embebe
+      # frontend/dist.
+      # ============================================================
+
+      - name: Run Go tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if [ ! -d frontend/dist ]; then
+            echo "ERROR: frontend/dist does not exist"
+            exit 1
+          fi
+
+          go test -v ./...
+
+      # ============================================================
+      # LOCATE APPLICATION
       # ============================================================
 
       - name: Locate generated application
@@ -318,8 +454,12 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "Contents of build/bin:"
-          find build/bin -maxdepth 3 -print
+          echo "Searching for generated .app..."
+
+          find build/bin \
+            -maxdepth 3 \
+            -print \
+            | sort
 
           APP_PATH="$(
             find build/bin \
@@ -331,18 +471,21 @@ jobs:
           )"
 
           if [ -z "$APP_PATH" ]; then
-            echo "ERROR: no macOS .app generated"
+            echo
+            echo "ERROR:"
+            echo "No macOS .app generated."
             exit 1
           fi
 
-          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          echo "APP_PATH=$APP_PATH" \
+            >> "$GITHUB_ENV"
 
           echo
-          echo "Generated application:"
+          echo "Application:"
           echo "$APP_PATH"
 
       # ============================================================
-      # MINIMUM MACOS
+      # SET MINIMUM MACOS VERSION
       # ============================================================
 
       - name: Set minimum macOS version
@@ -352,9 +495,15 @@ jobs:
 
           PLIST="${APP_PATH}/Contents/Info.plist"
 
+          if [ ! -f "$PLIST" ]; then
+            echo "ERROR: Info.plist not found"
+            exit 1
+          fi
+
           if /usr/libexec/PlistBuddy \
               -c "Print :LSMinimumSystemVersion" \
-              "$PLIST" >/dev/null 2>&1
+              "$PLIST" \
+              >/dev/null 2>&1
           then
 
             /usr/libexec/PlistBuddy \
@@ -377,7 +526,7 @@ jobs:
             "$PLIST"
 
       # ============================================================
-      # LOCATE BINARY
+      # LOCATE EXECUTABLE
       # ============================================================
 
       - name: Locate executable
@@ -394,12 +543,18 @@ jobs:
           BIN="${APP_PATH}/Contents/MacOS/${EXECUTABLE}"
 
           if [ ! -f "$BIN" ]; then
-            echo "ERROR: executable not found:"
+            echo
+            echo "ERROR: executable not found"
             echo "$BIN"
             exit 1
           fi
 
-          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          echo "BIN=$BIN" \
+            >> "$GITHUB_ENV"
+
+          echo
+          echo "Executable:"
+          echo "$BIN"
 
           echo
           file "$BIN"
@@ -418,13 +573,28 @@ jobs:
           echo "$INFO"
 
           if [ "${{ matrix.arch }}" = "arm64" ]; then
-            echo "$INFO" | grep -q "arm64"
+
+            echo "$INFO" \
+              | grep -q "arm64"
+
+          elif [ "${{ matrix.arch }}" = "amd64" ]; then
+
+            echo "$INFO" \
+              | grep -q "x86_64"
+
           else
-            echo "$INFO" | grep -q "x86_64"
+
+            echo "Unknown architecture:"
+            echo "${{ matrix.arch }}"
+            exit 1
+
           fi
 
+          echo
+          echo "Architecture verification successful."
+
       # ============================================================
-      # VERIFY NO HOMEBREW DEPENDENCIES
+      # VERIFY NO HOMEBREW / EXTERNAL LIBUSB
       # ============================================================
 
       - name: Verify dynamic dependencies
@@ -434,6 +604,9 @@ jobs:
 
           otool -L "$BIN" \
             | tee "${RUNNER_TEMP}/dependencies.txt"
+
+          echo
+          echo "Checking for external dependencies..."
 
           if grep -E \
             '(/opt/homebrew|/usr/local|libusb.*\.dylib)' \
@@ -445,35 +618,45 @@ jobs:
             echo "External Homebrew/libusb dependency detected."
 
             exit 1
+
           fi
 
           echo
-          echo "No external libusb dependency detected."
+          echo "No external Homebrew/libusb dependencies detected."
 
       # ============================================================
-      # VERIFY MACOS 11 DEPLOYMENT TARGET
+      # VERIFY DEPLOYMENT TARGET
       # ============================================================
 
-      - name: Verify deployment target
+      - name: Verify macOS deployment target
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "Mach-O build information:"
+          echo
+          echo "========================================"
+          echo "vtool"
+          echo "========================================"
+
           vtool -show-build "$BIN" || true
 
           echo
-          echo "Load commands:"
+          echo "========================================"
+          echo "Mach-O load commands"
+          echo "========================================"
 
           otool -l "$BIN" \
-            | grep -A 8 -E \
+            | grep -A 10 -E \
               'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX' \
             || true
 
       # ============================================================
       # AD-HOC SIGN
       #
-      # No Apple Developer certificate required for testing.
+      # Esto NO es Developer ID / notarización.
+      #
+      # Sirve para que el bundle tenga una firma coherente mientras
+      # probamos que realmente funciona.
       # ============================================================
 
       - name: Ad-hoc sign application
@@ -487,6 +670,9 @@ jobs:
             --sign - \
             "$APP_PATH"
 
+          echo
+          echo "Verifying signature..."
+
           codesign \
             --verify \
             --deep \
@@ -494,8 +680,20 @@ jobs:
             --verbose=2 \
             "$APP_PATH"
 
+          echo
+          echo "Signature information:"
+
+          codesign \
+            -dv \
+            --verbose=4 \
+            "$APP_PATH" \
+            2>&1 \
+            || true
+
       # ============================================================
       # PACKAGE
+      #
+      # ditto mantiene correctamente atributos y estructura .app.
       # ============================================================
 
       - name: Package application
@@ -517,17 +715,21 @@ jobs:
             > "${ZIP}.sha256"
 
           echo
-          echo "Generated artifacts:"
+          echo "========================================"
+          echo "Generated artifacts"
+          echo "========================================"
 
           ls -lh \
             "$ZIP" \
             "${ZIP}.sha256"
 
           echo
+          echo "SHA256:"
+
           cat "${ZIP}.sha256"
 
       # ============================================================
-      # ARTIFACT
+      # UPLOAD ARTIFACT
       # ============================================================
 
       - name: Upload macOS application
@@ -541,8 +743,19 @@ jobs:
 
           if-no-files-found: error
 
+          retention-days: 30
+
   # ==============================================================
-  # GITHUB RELEASE
+  # RELEASE
+  #
+  # Si ejecutas manualmente workflow_dispatch:
+  #
+  #   Actions → Artifacts
+  #
+  # Si haces push de un tag:
+  #
+  #   GitHub Release
+  #
   # ==============================================================
 
   release:
@@ -556,17 +769,27 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download builds
+      - name: Download macOS builds
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
       - name: Show release contents
+        shell: bash
         run: |
-          find dist -maxdepth 2 -type f -print
+          set -euxo pipefail
 
-      - name: Publish release
+          echo
+          echo "Release files:"
+
+          find dist \
+            -maxdepth 2 \
+            -type f \
+            -print \
+            | sort
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
