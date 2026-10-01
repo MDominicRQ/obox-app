@@ -1,4 +1,4 @@
-name: Build macOS
+name: Build macOS 11+
 
 on:
   workflow_dispatch:
@@ -11,11 +11,13 @@ permissions:
   contents: write
 
 env:
-  GO_VERSION: "1.26.0"
-  NODE_VERSION: "22.20.0"
+  # Go 1.24 es la última rama compatible con macOS 11 Big Sur
+  GO_VERSION: "1.24.13"
+
+  NODE_VERSION: "22"
+
   WAILS_VERSION: "v2.12.0"
 
-  # Compatible con macOS Big Sur en adelante.
   MACOSX_DEPLOYMENT_TARGET: "11.0"
 
   LIBUSB_VERSION: "1.0.30"
@@ -27,15 +29,14 @@ jobs:
 
     strategy:
       fail-fast: false
+
       matrix:
         include:
-          # Apple Silicon: M1 / M2 / M3 / M4...
           - arch: arm64
             runner: macos-15
             platform: darwin/arm64
             artifact: epos-proxy-macos-arm64-macos11plus
 
-          # Intel
           - arch: amd64
             runner: macos-15-intel
             platform: darwin/amd64
@@ -44,41 +45,107 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     steps:
+      # ============================================================
+      # SOURCE
+      # ============================================================
+
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ============================================================
+      # TOOLCHAINS
+      # ============================================================
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
+          cache: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Install build dependencies
+      - name: Install build tools
         run: |
           brew install pkg-config
 
-      - name: Install Wails
+      # ============================================================
+      # MACOS 11 COMPATIBILITY
+      #
+      # Current upstream:
+      #
+      #   go 1.25
+      #   Fiber 3.4
+      #   x/sys 0.47
+      #
+      # cannot produce a Go application supported on macOS 11.
+      #
+      # For this compatibility build we construct a compatible
+      # go.mod using the same application source.
+      # ============================================================
+
+      - name: Configure Go dependencies for macOS 11
+        shell: bash
         run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
+          set -euxo pipefail
+
+          cat > go.mod <<'EOF'
+          module epos-proxy
+
+          go 1.24.0
+
+          require (
+              github.com/emersion/go-autostart v0.0.0-20250403115856-34830d6457d2
+              github.com/gofiber/fiber/v3 v3.0.0-beta.4
+              github.com/google/gousb v1.1.3
+              github.com/sirupsen/logrus v1.9.4
+              github.com/wailsapp/wails/v2 v2.12.0
+              github.com/yusufpapurcu/wmi v1.2.4
+              golang.org/x/sys v0.30.0
+              gopkg.in/natefinch/lumberjack.v2 v2.2.1
+          )
+          EOF
+
+          rm -f go.sum
+
+          go mod tidy
+
+          echo
+          echo "=============================="
+          echo "Resolved Go module:"
+          echo "=============================="
+          cat go.mod
+
+          echo
+          echo "=============================="
+          echo "Go version:"
+          echo "=============================="
+          go version
+
+      # ============================================================
+      # WAILS
+      # ============================================================
+
+      - name: Install Wails
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          go install \
+            github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
 
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      # ------------------------------------------------------------
-      # Build libusb ourselves.
+      # ============================================================
+      # LIBUSB
       #
-      # This is intentional:
-      # we do NOT want the final application to depend on:
+      # Build statically so target Mac does NOT need:
       #
-      # /opt/homebrew/...
-      # /usr/local/...
+      #   brew install libusb
       #
-      # The application should work on another Mac without Homebrew.
-      # ------------------------------------------------------------
+      # ============================================================
 
       - name: Build static libusb
         shell: bash
@@ -87,6 +154,7 @@ jobs:
 
           PREFIX="${RUNNER_TEMP}/libusb-static"
           SRC="${RUNNER_TEMP}/libusb-src"
+          ARCHIVE="${RUNNER_TEMP}/libusb.tar.bz2"
 
           mkdir -p "$SRC"
 
@@ -95,13 +163,13 @@ jobs:
             --location \
             --retry 3 \
             "https://github.com/libusb/libusb/releases/download/v${LIBUSB_VERSION}/libusb-${LIBUSB_VERSION}.tar.bz2" \
-            --output "${RUNNER_TEMP}/libusb.tar.bz2"
+            --output "$ARCHIVE"
 
-          echo "${LIBUSB_SHA256}  ${RUNNER_TEMP}/libusb.tar.bz2" \
+          echo "${LIBUSB_SHA256}  ${ARCHIVE}" \
             | shasum -a 256 -c -
 
           tar \
-            -xjf "${RUNNER_TEMP}/libusb.tar.bz2" \
+            -xjf "$ARCHIVE" \
             -C "$SRC" \
             --strip-components=1
 
@@ -115,6 +183,7 @@ jobs:
             LDFLAGS="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}"
 
           make -j"$(sysctl -n hw.ncpu)"
+
           make install
 
           echo "PKG_CONFIG_PATH=${PREFIX}/lib/pkgconfig" >> "$GITHUB_ENV"
@@ -124,16 +193,61 @@ jobs:
           echo "CGO_CFLAGS=-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}" \
             >> "$GITHUB_ENV"
 
-          echo "CGO_LDFLAGS=-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET} -framework IOKit -framework CoreFoundation" \
+          # Security.framework es necesario para:
+          #
+          # SecTaskCreateFromSelf
+          # SecTaskCopyValueForEntitlement
+          #
+          echo "CGO_LDFLAGS=-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET} -framework IOKit -framework CoreFoundation -framework Security" \
             >> "$GITHUB_ENV"
 
-      - name: Show environment
+      # ============================================================
+      # FRONTEND
+      #
+      # main.go contiene:
+      #
+      # //go:embed all:frontend/dist
+      #
+      # Por eso frontend/dist DEBE existir antes de ejecutar
+      # go test.
+      # ============================================================
+
+      - name: Build frontend
+        shell: bash
         run: |
+          set -euxo pipefail
+
+          cd frontend
+
+          npm install
+
+          npm run build
+
+          cd ..
+
+          if [ ! -d frontend/dist ]; then
+            echo "ERROR: frontend/dist was not generated"
+            exit 1
+          fi
+
+          echo
+          echo "Frontend generated successfully:"
+          find frontend/dist -maxdepth 2 -type f -print
+
+      # ============================================================
+      # DIAGNOSTICS
+      # ============================================================
+
+      - name: Show build environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+
           echo "Architecture:"
           uname -m
 
           echo
-          echo "macOS:"
+          echo "macOS runner:"
           sw_vers
 
           echo
@@ -145,6 +259,10 @@ jobs:
           node --version
 
           echo
+          echo "npm:"
+          npm --version
+
+          echo
           echo "Wails:"
           wails version
 
@@ -153,12 +271,32 @@ jobs:
           pkg-config --modversion libusb-1.0
 
           echo
+          echo "libusb flags:"
+          pkg-config --cflags --libs libusb-1.0
+
+          echo
           echo "Deployment target:"
           echo "$MACOSX_DEPLOYMENT_TARGET"
 
+          echo
+          echo "CGO flags:"
+          echo "$CGO_CFLAGS"
+          echo "$CGO_LDFLAGS"
+
+      # ============================================================
+      # TESTS
+      # ============================================================
+
       - name: Run Go tests
+        shell: bash
         run: |
+          set -euxo pipefail
+
           go test -v ./...
+
+      # ============================================================
+      # BUILD
+      # ============================================================
 
       - name: Build ePOS Proxy
         shell: bash
@@ -171,35 +309,42 @@ jobs:
             -trimpath \
             -o epos-proxy
 
-      # ------------------------------------------------------------
-      # Find generated .app instead of assuming its exact name.
-      # ------------------------------------------------------------
+      # ============================================================
+      # FIND GENERATED APP
+      # ============================================================
 
-      - name: Locate application
+      - name: Locate generated application
         shell: bash
         run: |
           set -euxo pipefail
 
-          APP_PATH="$(find build/bin \
-            -maxdepth 1 \
-            -type d \
-            -name '*.app' \
-            -print \
-            -quit)"
+          echo "Contents of build/bin:"
+          find build/bin -maxdepth 3 -print
+
+          APP_PATH="$(
+            find build/bin \
+              -maxdepth 1 \
+              -type d \
+              -name '*.app' \
+              -print \
+              -quit
+          )"
 
           if [ -z "$APP_PATH" ]; then
-            echo "No macOS .app generated"
-            find build/bin -maxdepth 3 -print || true
+            echo "ERROR: no macOS .app generated"
             exit 1
           fi
 
           echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
 
+          echo
           echo "Generated application:"
           echo "$APP_PATH"
 
-      # Odoo currently has 10.13 in the Info.plist template.
-      # For our build we explicitly advertise Big Sur 11.0+.
+      # ============================================================
+      # MINIMUM MACOS
+      # ============================================================
+
       - name: Set minimum macOS version
         shell: bash
         run: |
@@ -207,14 +352,33 @@ jobs:
 
           PLIST="${APP_PATH}/Contents/Info.plist"
 
-          /usr/libexec/PlistBuddy \
-            -c "Set :LSMinimumSystemVersion ${MACOSX_DEPLOYMENT_TARGET}" \
-            "$PLIST"
+          if /usr/libexec/PlistBuddy \
+              -c "Print :LSMinimumSystemVersion" \
+              "$PLIST" >/dev/null 2>&1
+          then
 
-          echo "Minimum macOS:"
+            /usr/libexec/PlistBuddy \
+              -c "Set :LSMinimumSystemVersion ${MACOSX_DEPLOYMENT_TARGET}" \
+              "$PLIST"
+
+          else
+
+            /usr/libexec/PlistBuddy \
+              -c "Add :LSMinimumSystemVersion string ${MACOSX_DEPLOYMENT_TARGET}" \
+              "$PLIST"
+
+          fi
+
+          echo
+          echo "LSMinimumSystemVersion:"
+
           /usr/libexec/PlistBuddy \
             -c "Print :LSMinimumSystemVersion" \
             "$PLIST"
+
+      # ============================================================
+      # LOCATE BINARY
+      # ============================================================
 
       - name: Locate executable
         shell: bash
@@ -223,70 +387,94 @@ jobs:
 
           EXECUTABLE="$(
             /usr/libexec/PlistBuddy \
-              -c 'Print :CFBundleExecutable' \
+              -c "Print :CFBundleExecutable" \
               "${APP_PATH}/Contents/Info.plist"
           )"
 
           BIN="${APP_PATH}/Contents/MacOS/${EXECUTABLE}"
 
           if [ ! -f "$BIN" ]; then
-            echo "Executable not found: $BIN"
+            echo "ERROR: executable not found:"
+            echo "$BIN"
             exit 1
           fi
 
           echo "BIN=$BIN" >> "$GITHUB_ENV"
 
+          echo
           file "$BIN"
 
-      # ------------------------------------------------------------
-      # Critical check:
-      # ensure the application does not depend on Homebrew's libusb.
-      # ------------------------------------------------------------
+      # ============================================================
+      # VERIFY ARCHITECTURE
+      # ============================================================
+
+      - name: Verify architecture
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          INFO="$(file "$BIN")"
+
+          echo "$INFO"
+
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            echo "$INFO" | grep -q "arm64"
+          else
+            echo "$INFO" | grep -q "x86_64"
+          fi
+
+      # ============================================================
+      # VERIFY NO HOMEBREW DEPENDENCIES
+      # ============================================================
 
       - name: Verify dynamic dependencies
         shell: bash
         run: |
           set -euxo pipefail
 
-          otool -L "$BIN" | tee "${RUNNER_TEMP}/dependencies.txt"
+          otool -L "$BIN" \
+            | tee "${RUNNER_TEMP}/dependencies.txt"
 
           if grep -E \
             '(/opt/homebrew|/usr/local|libusb.*\.dylib)' \
             "${RUNNER_TEMP}/dependencies.txt"
           then
+
             echo
             echo "ERROR:"
-            echo "The application contains an external Homebrew/libusb dependency."
+            echo "External Homebrew/libusb dependency detected."
+
             exit 1
           fi
 
           echo
-          echo "No external libusb dependency found."
+          echo "No external libusb dependency detected."
 
-      - name: Show macOS deployment information
+      # ============================================================
+      # VERIFY MACOS 11 DEPLOYMENT TARGET
+      # ============================================================
+
+      - name: Verify deployment target
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "Mach-O:"
-          file "$BIN"
-
-          echo
-          echo "Build version:"
+          echo "Mach-O build information:"
           vtool -show-build "$BIN" || true
 
           echo
           echo "Load commands:"
+
           otool -l "$BIN" \
-            | grep -A 8 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX' \
+            | grep -A 8 -E \
+              'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX' \
             || true
 
-      # ------------------------------------------------------------
-      # Ad-hoc signing.
+      # ============================================================
+      # AD-HOC SIGN
       #
-      # This makes the bundle internally consistent, but it is NOT
-      # Apple Developer ID signing/notarisation.
-      # ------------------------------------------------------------
+      # No Apple Developer certificate required for testing.
+      # ============================================================
 
       - name: Ad-hoc sign application
         shell: bash
@@ -306,9 +494,9 @@ jobs:
             --verbose=2 \
             "$APP_PATH"
 
-      # ------------------------------------------------------------
-      # ZIP using Apple's ditto to preserve the .app metadata.
-      # ------------------------------------------------------------
+      # ============================================================
+      # PACKAGE
+      # ============================================================
 
       - name: Package application
         shell: bash
@@ -325,28 +513,37 @@ jobs:
             "$APP_PATH" \
             "$ZIP"
 
-          shasum -a 256 "$ZIP" > "${ZIP}.sha256"
+          shasum -a 256 "$ZIP" \
+            > "${ZIP}.sha256"
 
           echo
-          echo "Generated:"
-          ls -lh "$ZIP" "${ZIP}.sha256"
+          echo "Generated artifacts:"
 
+          ls -lh \
+            "$ZIP" \
+            "${ZIP}.sha256"
+
+          echo
           cat "${ZIP}.sha256"
 
-      - name: Upload macOS build
+      # ============================================================
+      # ARTIFACT
+      # ============================================================
+
+      - name: Upload macOS application
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
+
           path: |
             ${{ matrix.artifact }}.zip
             ${{ matrix.artifact }}.zip.sha256
+
           if-no-files-found: error
 
-  # --------------------------------------------------------------
-  # When a tag is pushed, publish both builds in GitHub Releases.
-  #
-  # Manual workflow_dispatch runs only create Actions artifacts.
-  # --------------------------------------------------------------
+  # ==============================================================
+  # GITHUB RELEASE
+  # ==============================================================
 
   release:
     name: Publish GitHub Release
@@ -359,13 +556,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download macOS builds
+      - name: Download builds
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Show release files
+      - name: Show release contents
         run: |
           find dist -maxdepth 2 -type f -print
 
@@ -375,4 +572,5 @@ jobs:
           files: |
             dist/*.zip
             dist/*.sha256
+
           generate_release_notes: true
