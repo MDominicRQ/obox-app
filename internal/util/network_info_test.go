@@ -99,3 +99,24 @@ func TestRunCmd_NonZeroExit(t *testing.T) {
 	_, err := runCmd("false")
 	testutil.ExpectedError(t, err)
 }
+
+
+func TestInterfaceClassification(t *testing.T) {
+	for _, name := range []string{"en0", "en1", "eth0", "wlan0", "Wi-Fi", "Ethernet"} {
+		testutil.ExpectedTrue(t, isLikelyPhysicalInterface(name), "expected physical interface classification for "+name)
+	}
+	for _, name := range []string{"utun3", "awdl0", "llw0", "bridge100", "docker0", "veth123", "tailscale0", "wg0"} {
+		testutil.ExpectedTrue(t, isLikelyVirtualInterface(name), "expected virtual interface classification for "+name)
+	}
+}
+
+func TestGetLocalIPv4Addresses(t *testing.T) {
+	seen := map[string]bool{}
+	for _, raw := range GetLocalIPv4Addresses() {
+		ip := net.ParseIP(raw)
+		testutil.ExpectedTrue(t, ip != nil && ip.To4() != nil, "expected IPv4 address, got "+raw)
+		testutil.ExpectedFalse(t, ip.IsLoopback(), "expected non-loopback address")
+		testutil.ExpectedFalse(t, seen[raw], "expected unique local IPv4 address")
+		seen[raw] = true
+	}
+}
