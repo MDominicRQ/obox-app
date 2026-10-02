@@ -400,6 +400,24 @@ func (a *App) triggerLocalNetworkPermissionProbe() {
 	}()
 }
 
+func macOSFirewallStatus() string {
+	if runtime.GOOS != "darwin" {
+		return "not applicable"
+	}
+
+	out, err := exec.Command(
+		"/usr/libexec/ApplicationFirewall/socketfilterfw",
+		"--getglobalstate",
+	).CombinedOutput()
+	if err != nil {
+		if len(out) > 0 {
+			return "unknown: " + string(out)
+		}
+		return "unknown: " + err.Error()
+	}
+	return string(out)
+}
+
 func probeProxyURL(rawURL string) error {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(rawURL)
@@ -462,7 +480,7 @@ func (a *App) ShowProxyDiagnostics() {
 	}
 
 	message := fmt.Sprintf(
-		"Local HTTP: %s\n%s\n\nLocal HTTPS: %s\n%s\n\nLAN HTTP self-check: %s\n%s\n\nLAN printer connectivity:%s\n\nFor a remote Odoo/POS, the LAN HTTP URL is the relevant proxy endpoint. If the LAN self-check is OK but another computer cannot open it, check the macOS Application Firewall. If a printer check fails on macOS 15+, enable ePOS Proxy under System Settings → Privacy & Security → Local Network.",
+		"Local HTTP: %s\n%s\n\nLocal HTTPS: %s\n%s\n\nLAN HTTP self-check: %s\n%s\n\nLAN printer connectivity:%s\n\nmacOS Application Firewall: %s\n\nFor a remote Odoo/POS, the LAN HTTP URL is the relevant proxy endpoint. If the LAN self-check is OK but another computer cannot open it, check System Settings → Network → Firewall → Options and allow ePOS Proxy. If a printer check fails on macOS 15+, enable ePOS Proxy under System Settings → Privacy & Security → Local Network.",
 		httpStatus,
 		httpURL,
 		httpsStatus,
@@ -470,6 +488,7 @@ func (a *App) ShowProxyDiagnostics() {
 		lanHTTPStatus,
 		lanHTTPURL,
 		printerLines,
+		macOSFirewallStatus(),
 	)
 
 	if _, err := a.dlg().Message(a.ctx, wailsruntime.MessageDialogOptions{
