@@ -71,14 +71,16 @@ func (a *App) showError(title, message string) {
 }
 
 type Printer struct {
-	Name    string `json:"name"`
-	Ip      string `json:"ip"`
-	HTTPSIp string `json:"httpsIp,omitempty"`
-	Id      string `json:"id"`
-	IsLAN   bool   `json:"isLAN"`
-	LANIp   string `json:"lanIp,omitempty"`
-	Online  bool   `json:"online"`
-	Type    string `json:"type"`
+	Name           string `json:"name"`
+	Ip             string `json:"ip"`
+	HTTPSIp        string `json:"httpsIp,omitempty"`
+	NetworkIp      string `json:"networkIp,omitempty"`
+	NetworkHTTPSIp string `json:"networkHttpsIp,omitempty"`
+	Id             string `json:"id"`
+	IsLAN          bool   `json:"isLAN"`
+	LANIp          string `json:"lanIp,omitempty"`
+	Online         bool   `json:"online"`
+	Type           string `json:"type"`
 }
 
 type UnavailablePrinter struct {
@@ -143,7 +145,10 @@ func (a *App) startup(ctx context.Context) {
 		return
 	}
 
-	certPaths, err := certs.Ensure(filepath.Dir(a.config.Path()), util.GetLocalIP(true))
+	lanIPs := util.GetLocalIPv4Addresses()
+	logger.Infof("Local IPv4 addresses available for HTTPS SANs: %v", lanIPs)
+
+	certPaths, err := certs.Ensure(filepath.Dir(a.config.Path()), lanIPs...)
 	if err != nil {
 		logger.Warnf("HTTPS disabled because local certificates could not be prepared: %v", err)
 		a.webserver = server.New(port, a.printerManager)
@@ -179,8 +184,11 @@ func (a *App) AppVariable() AppVariable {
 }
 
 func (a *App) GetPrinterUrl(id string) string {
-	url := fmt.Sprintf("%s:%d/p/%s", util.GetLocalIP(a.config.IsNetworkPrintingEnabled()), a.webserver.Port, id)
-	logger.Debugf("Generated HTTP printer endpoint: %s", url)
+	if a.webserver == nil {
+		return ""
+	}
+	url := fmt.Sprintf("%s:%d/p/%s", util.LOCALHOST_IP, a.webserver.Port, id)
+	logger.Debugf("Generated local HTTP printer endpoint: %s", url)
 	return url
 }
 
@@ -188,8 +196,34 @@ func (a *App) GetPrinterHTTPSUrl(id string) string {
 	if a.webserver == nil || a.webserver.HTTPSPort <= 0 {
 		return ""
 	}
-	url := fmt.Sprintf("%s:%d/p/%s", util.GetLocalIP(a.config.IsNetworkPrintingEnabled()), a.webserver.HTTPSPort, id)
-	logger.Debugf("Generated HTTPS printer endpoint: %s", url)
+	url := fmt.Sprintf("%s:%d/p/%s", util.LOCALHOST_IP, a.webserver.HTTPSPort, id)
+	logger.Debugf("Generated local HTTPS printer endpoint: %s", url)
+	return url
+}
+
+func (a *App) GetPrinterNetworkUrl(id string) string {
+	if a.webserver == nil || !a.config.IsNetworkPrintingEnabled() {
+		return ""
+	}
+	host := util.GetLocalIP(true)
+	if host == util.LOCALHOST_IP {
+		return ""
+	}
+	url := fmt.Sprintf("%s:%d/p/%s", host, a.webserver.Port, id)
+	logger.Debugf("Generated LAN HTTP printer endpoint: %s", url)
+	return url
+}
+
+func (a *App) GetPrinterNetworkHTTPSUrl(id string) string {
+	if a.webserver == nil || a.webserver.HTTPSPort <= 0 || !a.config.IsNetworkPrintingEnabled() {
+		return ""
+	}
+	host := util.GetLocalIP(true)
+	if host == util.LOCALHOST_IP {
+		return ""
+	}
+	url := fmt.Sprintf("%s:%d/p/%s", host, a.webserver.HTTPSPort, id)
+	logger.Debugf("Generated LAN HTTPS printer endpoint: %s", url)
 	return url
 }
 
@@ -210,9 +244,11 @@ func (a *App) Printers() Printers {
 			printers = append(printers, Printer{
 				Id:      info.Id,
 				Name:    info.Name,
-				Ip:      a.GetPrinterUrl(info.Id),
-				HTTPSIp: a.GetPrinterHTTPSUrl(info.Id),
-				Online:  true,
+				Ip:             a.GetPrinterUrl(info.Id),
+				HTTPSIp:        a.GetPrinterHTTPSUrl(info.Id),
+				NetworkIp:      a.GetPrinterNetworkUrl(info.Id),
+				NetworkHTTPSIp: a.GetPrinterNetworkHTTPSUrl(info.Id),
+				Online:         true,
 				Type:    string(info.Type),
 			})
 		}
@@ -236,9 +272,11 @@ func (a *App) Printers() Printers {
 		printers = append(printers, Printer{
 			Id:      info.Id,
 			Name:    fmt.Sprintf("Network - %s", info.IP),
-			Ip:      a.GetPrinterUrl(info.Id),
-			HTTPSIp: a.GetPrinterHTTPSUrl(info.Id),
-			IsLAN:   true,
+			Ip:             a.GetPrinterUrl(info.Id),
+			HTTPSIp:        a.GetPrinterHTTPSUrl(info.Id),
+			NetworkIp:      a.GetPrinterNetworkUrl(info.Id),
+			NetworkHTTPSIp: a.GetPrinterNetworkHTTPSUrl(info.Id),
+			IsLAN:          true,
 			LANIp:   info.IP,
 			Type:    string(printer.TypeReceipt),
 		})
@@ -412,14 +450,15 @@ func (a *App) IsNetworkPrintingEnabled() bool {
 }
 
 type TroubleshootInfo struct {
-	ActiveFirewall string `json:"activeFirewall"`
-	FirewallZone   string `json:"firewallZone"`
-	Port           int    `json:"port"`
-	HTTPSPort      int    `json:"httpsPort"`
-	HTTPSCACert    string `json:"httpsCaCert"`
-	Subnet         string `json:"subnet"`
-	LocalIP        string `json:"localIp"`
-	ExecPath       string `json:"execPath"`
+	ActiveFirewall string   `json:"activeFirewall"`
+	FirewallZone   string   `json:"firewallZone"`
+	Port           int      `json:"port"`
+	HTTPSPort      int      `json:"httpsPort"`
+	HTTPSCACert    string   `json:"httpsCaCert"`
+	Subnet         string   `json:"subnet"`
+	LocalIP        string   `json:"localIp"`
+	LocalIPv4s     []string `json:"localIPv4s"`
+	ExecPath       string   `json:"execPath"`
 }
 
 func (a *App) GetTroubleshootInfo() TroubleshootInfo {
@@ -433,6 +472,7 @@ func (a *App) GetTroubleshootInfo() TroubleshootInfo {
 		HTTPSCACert:    a.httpsCACertPath,
 		Subnet:         netInfo.Subnet,
 		LocalIP:        netInfo.IP,
+		LocalIPv4s:     util.GetLocalIPv4Addresses(),
 		ExecPath:       execPath,
 	}
 }
