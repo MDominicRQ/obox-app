@@ -14,6 +14,7 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
   const [copiedTarget, setCopiedTarget] = useState<"http" | "https" | null>(null);
   const [isTestPrinting, setIsTestPrinting] = useState(false);
   const [isCashDrawerOpening, setIsCashDrawerOpening] = useState(false);
+  const httpsIp = printer.httpsIp;
 
   async function onCopy(text: string, target: "http" | "https") {
     try {
@@ -77,9 +78,9 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
         {copiedTarget === "http" ? "✓ Copied!" : "Copy IP"}
       </button>
 
-      {printer.httpsIp && (
+      {httpsIp && (
         <button
-          onClick={() => onCopy(printer.httpsIp, "https")}
+          onClick={() => onCopy(httpsIp, "https")}
           className={`flex-1 border text-sm rounded-lg px-3 py-2 cursor-pointer whitespace-nowrap ${
             copiedTarget === "https"
               ? "bg-success text-white"
