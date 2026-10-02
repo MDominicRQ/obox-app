@@ -26,6 +26,13 @@ func createMenu(app *App) *menu.Menu {
 		handleNetworkPrintingToggle(app, cb)
 	})
 
+	appMenu.AddText("Install HTTPS Certificate", nil, func(_ *menu.CallbackData) {
+		if err := app.InstallHTTPSCertificate(); err != nil {
+			logger.Errorf("Failed to open HTTPS certificate: %v", err)
+			app.showError("HTTPS Certificate", err.Error())
+		}
+	})
+
 	appMenu.AddText("Download Logs", nil, func(_ *menu.CallbackData) {
 		app.DownloadLogs()
 	})
