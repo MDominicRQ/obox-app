@@ -100,9 +100,16 @@ export default function PrinterListItem({
             )}
 
             <div className="mt-2 text-xs text-gray-500">
-              Use Local addresses when Odoo runs in a browser on this Mac. Use
-              LAN addresses only from another device.
+              For Odoo 19 on current Chromium, prefer LAN HTTP / LNA and grant
+              the Odoo site Local Network access in the browser.
             </div>
+
+            {!printerContext.data.networkPrintingEnabled && (
+              <div className="mt-2 text-xs text-amber-700">
+                Enable App → Allow Network Printing to expose the recommended
+                LAN address.
+              </div>
+            )}
           </div>
           <PrinterActions printer={printer} />
         </li>
