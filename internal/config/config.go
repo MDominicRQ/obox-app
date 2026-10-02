@@ -100,7 +100,7 @@ func (cm *Manager) saveLocked() error {
 func (cm *Manager) Path() string { return cm.path }
 
 func isPortAvailable(port int) bool {
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
 		return false
 	}
