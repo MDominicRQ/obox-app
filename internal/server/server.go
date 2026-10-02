@@ -42,8 +42,30 @@ func newFiberApp(mgr *printer.Manager) *fiber.App {
 	}))
 
 	app.Get("/", func(ctx fiber.Ctx) error {
-		return ctx.SendString(fmt.Sprintf("Hello from %s", app.Config().AppName))
+		return ctx.JSON(fiber.Map{
+			"status":  "ok",
+			"service": app.Config().AppName,
+			"message": "ePOS Proxy is reachable",
+		})
 	})
+
+	app.Get("/healthz", func(ctx fiber.Ctx) error {
+		return ctx.JSON(fiber.Map{
+			"status":  "ok",
+			"service": app.Config().AppName,
+		})
+	})
+
+	printerHealth := func(ctx fiber.Ctx) error {
+		return ctx.JSON(fiber.Map{
+			"status":    "ok",
+			"service":   app.Config().AppName,
+			"printerId": ctx.Params("printerId"),
+			"message":   "ePOS Proxy printer endpoint is reachable. Use this same address in Odoo without adding http:// or https://.",
+		})
+	}
+	app.Get("/p/:printerId", printerHealth)
+	app.Get("/p/:printerId/", printerHealth)
 
 	app.Get("/p/:printerId/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
 		return ctx.Status(fiber.StatusOK).Send([]byte{})
