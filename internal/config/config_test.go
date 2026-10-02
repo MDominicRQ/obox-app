@@ -101,7 +101,7 @@ func TestIsPortAvailable(t *testing.T) {
 	testutil.ExpectedTrue(t, isPortAvailable(port), "Expected port to be available")
 
 	// Occupy the port and test again
-	lnOccupied, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	lnOccupied, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
 	testutil.ExpectedNoError(t, err)
 	defer lnOccupied.Close()
 
@@ -142,7 +142,7 @@ func TestManager_ResolvePort(t *testing.T) {
 	testutil.ExpectedEqual(t, resolved2, resolved)
 
 	// Case 3: Port is set but occupied -> Should resolve a new port
-	ln, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", resolved))
+	ln, err = net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", resolved))
 	testutil.ExpectedNoError(t, err)
 	defer ln.Close()
 
@@ -227,7 +227,7 @@ func TestFindAvailablePort_RangeExhausted(t *testing.T) {
 	end := start + 2
 	var listeners []net.Listener
 	for p := start; p <= end; p++ {
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p))
 		if err != nil {
 			for _, l := range listeners {
 				_ = l.Close()
