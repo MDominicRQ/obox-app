@@ -132,6 +132,15 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
         </button>
       )}
 
+      {networkIp && (
+        <button
+          onClick={() => openProxyAddress(networkIp, "http")}
+          className="flex-1 border rounded-lg text-sm px-3 py-2 cursor-pointer border-gray-300 text-gray-600 hover:bg-gray-50 hover:border-gray-400 whitespace-nowrap"
+        >
+          Open LAN HTTP
+        </button>
+      )}
+
       {networkHttpsIp && (
         <button
           onClick={() => onCopy(networkHttpsIp, "lan-https")}
@@ -142,6 +151,15 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
           }`}
         >
           {copiedTarget === "lan-https" ? "✓ Copied!" : "Copy LAN HTTPS"}
+        </button>
+      )}
+
+      {networkHttpsIp && (
+        <button
+          onClick={() => openProxyAddress(networkHttpsIp, "https")}
+          className="flex-1 border rounded-lg text-sm px-3 py-2 cursor-pointer border-gray-300 text-gray-600 hover:bg-gray-50 hover:border-gray-400 whitespace-nowrap"
+        >
+          Open LAN HTTPS
         </button>
       )}
 
