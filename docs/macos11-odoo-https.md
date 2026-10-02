@@ -18,7 +18,7 @@ Each printer can expose up to four protocol-free Odoo addresses:
 
 Copy the address exactly as shown. Do **not** prefix it with `http://` or `https://` in the Odoo printer field; Odoo selects the protocol itself.
 
-For current Chrome/Chromium, prefer the **LAN HTTP / LNA** address when available. Chrome 145+ distinguishes LAN and loopback permissions, so `127.0.0.1` may require a separate loopback permission.
+If Odoo is open in a browser on the same Mac as ePOS Proxy, prefer **Local HTTP / LNA**. Loopback avoids LAN routing and macOS firewall/interface-selection issues. Use a LAN address only when the POS browser is on another device.
 
 ## Odoo 19
 
@@ -26,12 +26,12 @@ Modern Chromium with Local Network Access:
 
 ```text
 point_of_sale.use_lna = True
-Epson Printer IP Address = <LAN HTTP / LNA address>
+Epson Printer IP Address = <Local HTTP / LNA address>
 ```
 
 On Odoo 19.1+ use the printer's **Use Local Network Access** option when available.
 
-Chrome/Chromium 142+ requires permission for the Odoo site to access the local network. In Chrome, check:
+Current Chrome/Chromium requires permission for the Odoo site to access local/loopback network targets. If the browser reports that Local Network Access is denied, check:
 
 ```text
 Settings → Privacy and security → Site settings
@@ -57,13 +57,17 @@ https://192.168.1.77:4645/p/<printer-id>/cgi-bin/epos/service.cgi?devid=local_pr
 
 ePOS Proxy supports the same browser check recommended for Epson/Odoo devices.
 
-Open:
+The app now has **Open HTTP** and **Open HTTPS** buttons. They open the exact configured base address in the system browser.
+
+A working base address returns JSON containing `"status":"ok"` and the printer ID. This is also the URL Odoo tells users to open when manually accepting an HTTPS certificate, so it no longer returns 404.
+
+You can still test the Epson-compatible service route directly:
 
 ```text
 http://<host>:<http-port>/p/<printer-id>/cgi-bin/epos/service.cgi?devid=local_printer
 ```
 
-A blank page with HTTP 200 means the proxy endpoint is reachable. This GET check does not print anything; printing continues to use POST.
+That GET request returns HTTP 200 without printing; actual print jobs use POST.
 
 The route without `/p/<printer-id>` is also available for connectivity checks and auto-printer mode:
 
@@ -119,10 +123,10 @@ Closing the red window button hides the window instead of quitting. The proxy co
 
 1. Keep ePOS Proxy running; closing the window is safe, but **App → Quit** stops printing.
 2. Confirm the in-app **Test** button prints. It intentionally uses the local HTTP proxy and validates the proxy-to-printer path.
-3. For current Chromium/Odoo 19, enable LNA and use **LAN HTTP / LNA**.
-4. Check Chrome's **Local network** permission for the exact Odoo database origin.
-5. Open the browser connectivity-check URL above. It must return a blank page rather than 404.
-6. If LAN access fails but `127.0.0.1` works, check the macOS Application Firewall and the selected LAN address.
-7. If HTTPS is required, trust the local CA and then test the HTTPS address.
+3. For current Chromium/Odoo 19 on the same Mac, enable LNA and use **Local HTTP / LNA** (`127.0.0.1`).
+4. Use **Open HTTP**. The browser must show the ePOS Proxy `status: ok` diagnostic page.
+5. Check the browser's **Local network** permission for the exact Odoo database origin if Odoo still reports the printer unreachable.
+6. Use LAN addresses only when the POS browser is running on another device; on modern macOS, allow Local Network access for the browser/app and check the macOS Application Firewall.
+7. If HTTPS is required, disable LNA in Odoo, trust the local CA, and use **Open HTTPS**. The browser must show the same `status: ok` diagnostic page without a certificate warning.
 8. If the Mac LAN IP changes, restart ePOS Proxy so the server certificate can be reissued with current SANs. The CA remains unchanged.
 9. Check application logs for `EPOS HTTP Server Error`, `EPOS HTTPS Server Error`, or certificate preparation errors.
