@@ -43,6 +43,10 @@ func createMenu(app *App) *menu.Menu {
 		}
 	})
 
+	appMenu.AddText("Test Proxy Connections", nil, func(_ *menu.CallbackData) {
+		app.ShowProxyDiagnostics()
+	})
+
 	appMenu.AddText("Download Logs", nil, func(_ *menu.CallbackData) {
 		app.DownloadLogs()
 	})
