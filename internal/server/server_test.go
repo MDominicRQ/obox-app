@@ -223,6 +223,32 @@ func TestPrintData_AutoSelectRoute(t *testing.T) {
 }
 
 
+func TestPrinterBaseRouteIsBrowserTestable(t *testing.T) {
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	for _, path := range []string{"/", "/healthz", "/p/test-printer", "/p/test-printer/"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		resp, err := s.app.Test(req)
+		testutil.ExpectedNoError(t, err)
+		testutil.ExpectedEqual(t, resp.StatusCode, http.StatusOK)
+
+		body, err := io.ReadAll(resp.Body)
+		testutil.ExpectedNoError(t, err)
+		testutil.ExpectedContains(t, string(body), `"status":"ok"`)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/p/test-printer", nil)
+	resp, err := s.app.Test(req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `"printerId":"test-printer"`)
+	testutil.ExpectedContains(t, string(body), "ePOS Proxy printer endpoint is reachable")
+}
+
 func TestEPOSConnectivityCheckRoutes(t *testing.T) {
 	port := testutil.GetFreePort(t)
 	mgr := printer.NewManager()
