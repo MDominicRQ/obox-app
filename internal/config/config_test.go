@@ -19,6 +19,7 @@ func TestNewManager(t *testing.T) {
 	testutil.ExpectedNotNil(t, cm)
 	testutil.ExpectedTrue(t, cm.Path() != "", "Expected non-empty config path")
 	testutil.ExpectedEqual(t, cm.Data.Port, 0)
+	testutil.ExpectedEqual(t, cm.Data.HTTPSPort, 0)
 }
 
 func TestManager_Load(t *testing.T) {
@@ -46,6 +47,7 @@ func TestManager_Load(t *testing.T) {
 	err = cm.Load()
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedEqual(t, cm.Data.Port, 4550)
+	testutil.ExpectedEqual(t, cm.Data.HTTPSPort, 0)
 	testutil.ExpectedLen(t, cm.Data.LANPrinters, 2)
 	testutil.ExpectedEqual(t, cm.Data.LANPrinters[0], "192.168.1.10")
 	testutil.ExpectedEqual(t, cm.Data.LANPrinters[1], "192.168.1.20")
@@ -66,6 +68,7 @@ func TestManager_Save(t *testing.T) {
 		path: configFile,
 		Data: AppConfig{
 			Port:        4548,
+			HTTPSPort:   4648,
 			LANPrinters: []string{"10.0.0.5"},
 		},
 	}
@@ -82,6 +85,7 @@ func TestManager_Save(t *testing.T) {
 	err = json.Unmarshal(data, &loaded)
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedEqual(t, loaded.Port, 4548)
+	testutil.ExpectedEqual(t, loaded.HTTPSPort, 4648)
 	testutil.ExpectedLen(t, loaded.LANPrinters, 1)
 	testutil.ExpectedEqual(t, loaded.LANPrinters[0], "10.0.0.5")
 
@@ -243,4 +247,31 @@ func TestFindAvailablePort_RangeExhausted(t *testing.T) {
 	testutil.ExpectedError(t, err)
 	testutil.ExpectedTrue(t, errors.Is(err, ErrNoAvailablePort))
 	testutil.ExpectedEqual(t, port, 0)
+}
+
+
+func TestManager_ResolveHTTPSPort(t *testing.T) {
+	tempDir := t.TempDir()
+	cm := &Manager{
+		path: filepath.Join(tempDir, "config.json"),
+		Data: AppConfig{Port: 4545},
+	}
+
+	resolved, err := cm.ResolveHTTPSPort(4545)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedTrue(t, resolved >= HTTPSPortRangeStart && resolved <= HTTPSPortRangeEnd)
+	testutil.ExpectedNotEqual(t, resolved, 4545)
+	testutil.ExpectedEqual(t, cm.GetHTTPSPort(), resolved)
+
+	resolvedAgain, err := cm.ResolveHTTPSPort(4545)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedEqual(t, resolvedAgain, resolved)
+
+	raw, err := os.ReadFile(cm.path)
+	testutil.ExpectedNoError(t, err)
+
+	var loaded AppConfig
+	err = json.Unmarshal(raw, &loaded)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedEqual(t, loaded.HTTPSPort, resolved)
 }
