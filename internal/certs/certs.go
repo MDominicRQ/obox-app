@@ -134,8 +134,12 @@ func ensureCA(paths Paths) (*x509.Certificate, *rsa.PrivateKey, error) {
 
 func ensureServerCertificate(paths Paths, caCert *x509.Certificate, caKey *rsa.PrivateKey, lanIP string) error {
 	if serverCertificateIsCurrent(paths, caCert, lanIP) {
-		_ = os.Chmod(paths.ServerKey, 0o600)
-		_ = os.Chmod(paths.ServerCert, 0o644)
+		if err := os.Chmod(paths.ServerKey, 0o600); err != nil {
+			return fmt.Errorf("secure HTTPS server key permissions: %w", err)
+		}
+		if err := os.Chmod(paths.ServerCert, 0o644); err != nil {
+			return fmt.Errorf("set HTTPS server certificate permissions: %w", err)
+		}
 		return nil
 	}
 
