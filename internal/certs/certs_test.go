@@ -11,7 +11,7 @@ import (
 
 func TestEnsureCreatesPersistentCAAndServerSANs(t *testing.T) {
 	baseDir := t.TempDir()
-	paths, err := Ensure(baseDir, "192.168.1.77")
+	paths, err := Ensure(baseDir, "192.168.1.77", "10.0.0.5")
 	if err != nil {
 		t.Fatalf("Ensure() error = %v", err)
 	}
@@ -33,13 +33,13 @@ func TestEnsureCreatesPersistentCAAndServerSANs(t *testing.T) {
 	if !containsString(server.DNSNames, "localhost") {
 		t.Fatalf("server certificate missing localhost SAN")
 	}
-	for _, expected := range []string{"127.0.0.1", "192.168.1.77"} {
+	for _, expected := range []string{"127.0.0.1", "192.168.1.77", "10.0.0.5"} {
 		if !containsIP(server.IPAddresses, net.ParseIP(expected)) {
 			t.Fatalf("server certificate missing IP SAN %s", expected)
 		}
 	}
 
-	pathsAgain, err := Ensure(baseDir, "192.168.1.77")
+	pathsAgain, err := Ensure(baseDir, "192.168.1.77", "10.0.0.5")
 	if err != nil {
 		t.Fatalf("second Ensure() error = %v", err)
 	}
@@ -129,4 +129,24 @@ func mustReadCert(t *testing.T, path string) *x509.Certificate {
 		t.Fatal(err)
 	}
 	return cert
+}
+
+
+func TestCertificateIPsDeduplicatesAndKeepsLoopback(t *testing.T) {
+	ips := certificateIPs([]string{
+		"192.168.1.77",
+		"192.168.1.77",
+		"127.0.0.1",
+		"not-an-ip",
+		"10.0.0.5",
+	})
+
+	for _, expected := range []string{"127.0.0.1", "192.168.1.77", "10.0.0.5"} {
+		if !containsIP(ips, net.ParseIP(expected)) {
+			t.Fatalf("certificate IP list missing %s", expected)
+		}
+	}
+	if len(ips) != 3 {
+		t.Fatalf("certificate IP list length = %d, want 3", len(ips))
+	}
 }
