@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"net/http"
 	"time"
 
 	"epos-proxy/internal/certs"
@@ -372,6 +373,61 @@ func (a *App) DownloadLogs() {
 		return
 	}
 	logger.Infof("Logs successfully exported to: %s", savePath)
+}
+
+func probeProxyURL(rawURL string) error {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(rawURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("unexpected HTTP status %s", resp.Status)
+	}
+	return nil
+}
+
+func (a *App) ShowProxyDiagnostics() {
+	if a.webserver == nil {
+		a.showError("Proxy Diagnostics", "The proxy server has not started.")
+		return
+	}
+
+	httpURL := fmt.Sprintf("http://%s:%d/healthz", util.LOCALHOST_IP, a.webserver.Port)
+	httpsURL := ""
+	if a.webserver.HTTPSPort > 0 {
+		httpsURL = fmt.Sprintf("https://%s:%d/healthz", util.LOCALHOST_IP, a.webserver.HTTPSPort)
+	}
+
+	httpStatus := "OK"
+	if err := probeProxyURL(httpURL); err != nil {
+		httpStatus = "FAILED: " + err.Error()
+	}
+
+	httpsStatus := "disabled"
+	if httpsURL != "" {
+		httpsStatus = "OK"
+		if err := probeProxyURL(httpsURL); err != nil {
+			httpsStatus = "FAILED: " + err.Error()
+		}
+	}
+
+	message := fmt.Sprintf(
+		"HTTP: %s\n%s\n\nHTTPS: %s\n%s\n\nIf HTTP is OK but Odoo cannot print, check Odoo LNA and the browser Local Network permission. If HTTPS fails with a certificate error, use App → Install HTTPS Certificate and trust the local CA.",
+		httpStatus,
+		httpURL,
+		httpsStatus,
+		httpsURL,
+	)
+
+	if _, err := a.dlg().Message(a.ctx, wailsruntime.MessageDialogOptions{
+		Type:    wailsruntime.InfoDialog,
+		Title:   "Proxy Diagnostics",
+		Message: message,
+	}); err != nil {
+		logger.Errorf("Failed to show proxy diagnostics: %v", err)
+	}
 }
 
 func (a *App) InstallHTTPSCertificate() error {
