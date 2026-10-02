@@ -121,6 +121,24 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
 
       {networkIp && (
         <button
+          onClick={() => openProxyAddress(networkIp, "http")}
+          className="flex-1 border rounded-lg text-sm px-3 py-2 cursor-pointer border-gray-300 text-gray-600 hover:bg-gray-50 hover:border-gray-400 whitespace-nowrap"
+        >
+          Open LAN HTTP
+        </button>
+      )}
+
+      {networkHttpsIp && (
+        <button
+          onClick={() => openProxyAddress(networkHttpsIp, "https")}
+          className="flex-1 border rounded-lg text-sm px-3 py-2 cursor-pointer border-gray-300 text-gray-600 hover:bg-gray-50 hover:border-gray-400 whitespace-nowrap"
+        >
+          Open LAN HTTPS
+        </button>
+      )}
+
+      {networkIp && (
+        <button
           onClick={() => onCopy(networkIp, "lan-http")}
           className={`flex-1 border text-sm rounded-lg px-3 py-2 cursor-pointer whitespace-nowrap ${
             copiedTarget === "lan-http"
