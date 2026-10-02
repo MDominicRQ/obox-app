@@ -3,6 +3,7 @@ import { ToastContext } from "../contexts/ToastContext";
 import { main } from "../../wailsjs/go/models";
 import { errorText } from "../error";
 import { executePrint } from "../functions/executePrint";
+import { copyText } from "../functions/copyText";
 
 interface PrinterActionsProps {
   printer: main.Printer;
@@ -10,15 +11,15 @@ interface PrinterActionsProps {
 
 export default function PrinterActions({ printer }: PrinterActionsProps) {
   const toastContext = useContext(ToastContext);
-  const [copiedIp, setCopiedIp] = useState(false);
+  const [copiedTarget, setCopiedTarget] = useState<"http" | "https" | null>(null);
   const [isTestPrinting, setIsTestPrinting] = useState(false);
   const [isCashDrawerOpening, setIsCashDrawerOpening] = useState(false);
 
-  async function onCopy() {
+  async function onCopy(text: string, target: "http" | "https") {
     try {
-      await navigator.clipboard.writeText(printer.ip);
-      setCopiedIp(true);
-      setTimeout(() => setCopiedIp(false), 2000);
+      await copyText(text);
+      setCopiedTarget(target);
+      setTimeout(() => setCopiedTarget(null), 2000);
     } catch (err) {
       toastContext.actions.showToast(
         `Copy failed: ${errorText(err, "unknown error")}`,
@@ -66,15 +67,28 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
   return (
     <div className="flex gap-2 mt-4 flex-wrap">
       <button
-        onClick={onCopy}
+        onClick={() => onCopy(printer.ip, "http")}
         className={`flex-1 border text-sm rounded-lg px-3 py-2 cursor-pointer whitespace-nowrap ${
-          copiedIp
+          copiedTarget === "http"
             ? "bg-success text-white"
             : "bg-odoo text-white hover:bg-odoo-dark"
         }`}
       >
-        {copiedIp ? "✓ Copied!" : "Copy IP"}
+        {copiedTarget === "http" ? "✓ Copied!" : "Copy IP"}
       </button>
+
+      {printer.httpsIp && (
+        <button
+          onClick={() => onCopy(printer.httpsIp, "https")}
+          className={`flex-1 border text-sm rounded-lg px-3 py-2 cursor-pointer whitespace-nowrap ${
+            copiedTarget === "https"
+              ? "bg-success text-white"
+              : "bg-odoo text-white hover:bg-odoo-dark"
+          }`}
+        >
+          {copiedTarget === "https" ? "✓ Copied!" : "Copy HTTPS"}
+        </button>
+      )}
 
       <button
         onClick={onTest}
