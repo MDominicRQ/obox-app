@@ -344,7 +344,7 @@ func (a *App) InstallHTTPSCertificate() error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", "-a", "Keychain Access", a.httpsCACertPath)
+		cmd = exec.Command("open", a.httpsCACertPath)
 	case "windows":
 		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", a.httpsCACertPath)
 	default:
