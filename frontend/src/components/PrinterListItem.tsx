@@ -66,18 +66,43 @@ export default function PrinterListItem({
           </div>
           <div className="mt-2 text-sm">
             <div className="text-xs font-medium uppercase tracking-wide text-gray-500">
-              HTTP / LNA
+              Local HTTP / LNA
             </div>
             <div className="text-gray-600 break-all">{printer.ip}</div>
 
             {printer.httpsIp && (
               <>
                 <div className="mt-2 text-xs font-medium uppercase tracking-wide text-gray-500">
-                  HTTPS / Legacy macOS
+                  Local HTTPS / Legacy
                 </div>
                 <div className="text-gray-600 break-all">{printer.httpsIp}</div>
               </>
             )}
+
+            {printer.networkIp && (
+              <>
+                <div className="mt-3 text-xs font-medium uppercase tracking-wide text-gray-500">
+                  LAN HTTP / LNA
+                </div>
+                <div className="text-gray-600 break-all">{printer.networkIp}</div>
+              </>
+            )}
+
+            {printer.networkHttpsIp && (
+              <>
+                <div className="mt-2 text-xs font-medium uppercase tracking-wide text-gray-500">
+                  LAN HTTPS / Legacy
+                </div>
+                <div className="text-gray-600 break-all">
+                  {printer.networkHttpsIp}
+                </div>
+              </>
+            )}
+
+            <div className="mt-2 text-xs text-gray-500">
+              Use Local addresses when Odoo runs in a browser on this Mac. Use
+              LAN addresses only from another device.
+            </div>
           </div>
           <PrinterActions printer={printer} />
         </li>
