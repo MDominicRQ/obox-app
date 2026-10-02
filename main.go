@@ -13,7 +13,6 @@ package main
 
 import (
 	"C"
-	"context"
 	"embed"
 	"os"
 
@@ -28,19 +27,33 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+func startupWindowOptions(args []string) (options.WindowStartState, bool) {
+	windowStartState := options.Normal
+	startHidden := false
+
+	for _, arg := range args {
+		switch arg {
+		case "--background":
+			startHidden = true
+		case "--minimized":
+			// Keep the old flag working for existing shortcuts.
+			windowStartState = options.Minimised
+		}
+	}
+	return windowStartState, startHidden
+}
+
 func main() {
 	logger.InitLogger()
 	logger.Debugf("Starting ePOS Proxy")
 
 	app := NewApp()
 
-	windowStartState := options.Normal
-	for _, arg := range os.Args[1:] {
-		if arg == "--minimized" {
-			logger.Debugf("Application started with --minimized flag")
-			windowStartState = options.Minimised
-			break
-		}
+	windowStartState, startHidden := startupWindowOptions(os.Args[1:])
+	if startHidden {
+		logger.Debugf("Application started in background mode")
+	} else if windowStartState == options.Minimised {
+		logger.Debugf("Application started with --minimized flag")
 	}
 
 	err := wails.Run(&options.App{
@@ -52,6 +65,8 @@ func main() {
 		Menu:                     createMenu(app),
 		EnableDefaultContextMenu: true,
 		WindowStartState:         windowStartState,
+		StartHidden:              startHidden,
+		HideWindowOnClose:        true,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
@@ -63,18 +78,9 @@ func main() {
 				wailsruntime.WindowUnminimise(app.ctx)
 			},
 		},
-		OnBeforeClose: func(ctx context.Context) (prevent bool) {
-			if app.ConfirmQuit() {
-				logger.Infof("User confirmed quit")
-				return false
-			}
-
-			logger.Infof("Close requested, minimizing window instead of quitting")
-			wailsruntime.WindowMinimise(ctx)
-			return true
-		},
 		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 1},
 		OnStartup:        app.startup,
+		OnShutdown:       app.shutdown,
 		Bind: []interface{}{
 			app,
 		},

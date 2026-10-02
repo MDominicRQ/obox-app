@@ -18,6 +18,16 @@ func createMenu(app *App) *menu.Menu {
 		mainMenu.Append(menu.EditMenu())
 	}
 
+	appMenu.AddText("Show Window", nil, func(_ *menu.CallbackData) {
+		wailsruntime.WindowShow(app.ctx)
+		wailsruntime.WindowUnminimise(app.ctx)
+	})
+
+	appMenu.AddText("Run in Background", nil, func(_ *menu.CallbackData) {
+		logger.Infof("Hiding application window; proxy remains running in background")
+		wailsruntime.WindowHide(app.ctx)
+	})
+
 	appMenu.AddCheckbox("Auto Start", app.IsAutostartEnabled(), nil, func(cb *menu.CallbackData) {
 		handleAutoStartToggle(app, cb)
 	})
@@ -26,12 +36,27 @@ func createMenu(app *App) *menu.Menu {
 		handleNetworkPrintingToggle(app, cb)
 	})
 
+	appMenu.AddText("Install HTTPS Certificate", nil, func(_ *menu.CallbackData) {
+		if err := app.InstallHTTPSCertificate(); err != nil {
+			logger.Errorf("Failed to open HTTPS certificate: %v", err)
+			app.showError("HTTPS Certificate", err.Error())
+		}
+	})
+
+	appMenu.AddText("Test Proxy Connections", nil, func(_ *menu.CallbackData) {
+		app.ShowProxyDiagnostics()
+	})
+
 	appMenu.AddText("Download Logs", nil, func(_ *menu.CallbackData) {
 		app.DownloadLogs()
 	})
 
 	appMenu.AddText("Quit", nil, func(_ *menu.CallbackData) {
 		logger.Infof("Quit requested by user")
+		if !app.ConfirmQuit() {
+			return
+		}
+		logger.Infof("User confirmed quit")
 		wailsruntime.Quit(app.ctx)
 	})
 

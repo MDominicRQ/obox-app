@@ -22,22 +22,69 @@ type EPOSResponse struct {
 }
 
 type Server struct {
-	app     *fiber.App
-	Port    int
-	running atomic.Bool
+	app          *fiber.App
+	httpsApp     *fiber.App
+	Port         int
+	HTTPSPort    int
+	httpRunning  atomic.Bool
+	httpsRunning atomic.Bool
 }
 
-func New(port int, mgr *printer.Manager) *Server {
+func newFiberApp(mgr *printer.Manager) *fiber.App {
 	app := fiber.New(fiber.Config{
 		AppName: "ePOS proxy",
 	})
+	app.Use(func(ctx fiber.Ctx) error {
+		logger.Debugf(
+			"Proxy request method=%s path=%s remote=%s origin=%q acrpn=%q",
+			ctx.Method(),
+			ctx.Path(),
+			ctx.IP(),
+			ctx.Get("Origin"),
+			ctx.Get("Access-Control-Request-Private-Network"),
+		)
+		return ctx.Next()
+	})
+
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:        []string{"*"},
+		AllowOriginsFunc: func(origin string) bool {
+			return origin != ""
+		},
 		AllowPrivateNetwork: true,
 	}))
 
 	app.Get("/", func(ctx fiber.Ctx) error {
-		return ctx.SendString(fmt.Sprintf("Hello from %s", app.Config().AppName))
+		return ctx.JSON(fiber.Map{
+			"status":  "ok",
+			"service": app.Config().AppName,
+			"message": "ePOS Proxy is reachable",
+		})
+	})
+
+	app.Get("/healthz", func(ctx fiber.Ctx) error {
+		return ctx.JSON(fiber.Map{
+			"status":  "ok",
+			"service": app.Config().AppName,
+		})
+	})
+
+	printerHealth := func(ctx fiber.Ctx) error {
+		return ctx.JSON(fiber.Map{
+			"status":    "ok",
+			"service":   app.Config().AppName,
+			"printerId": ctx.Params("printerId"),
+			"message":   "ePOS Proxy printer endpoint is reachable. Use this same address in Odoo without adding http:// or https://.",
+		})
+	}
+	app.Get("/p/:printerId", printerHealth)
+	app.Get("/p/:printerId/", printerHealth)
+
+	app.Get("/p/:printerId/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
+		return ctx.Status(fiber.StatusOK).Send([]byte{})
+	})
+
+	app.Get("/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
+		return ctx.Status(fiber.StatusOK).Send([]byte{})
 	})
 
 	app.Post("/p/:printerId/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
@@ -57,17 +104,55 @@ func New(port int, mgr *printer.Manager) *Server {
 		return printLabel(mgr, ctx, printerId)
 	})
 
-	server := &Server{app: app, Port: port}
-	server.running.Store(true)
+	return app
+}
+
+func New(port int, mgr *printer.Manager) *Server {
+	return newServer(port, 0, "", "", mgr)
+}
+
+func NewWithTLS(port, httpsPort int, certFile, keyFile string, mgr *printer.Manager) *Server {
+	return newServer(port, httpsPort, certFile, keyFile, mgr)
+}
+
+func newServer(port, httpsPort int, certFile, keyFile string, mgr *printer.Manager) *Server {
+	server := &Server{
+		app:       newFiberApp(mgr),
+		Port:      port,
+		HTTPSPort: httpsPort,
+	}
+
+	server.httpRunning.Store(true)
 	go func() {
 		logger.Infof("HTTP server listening on 0.0.0.0:%d", port)
-		err := app.Listen(fmt.Sprintf("0.0.0.0:%d", port))
+		err := server.app.Listen(fmt.Sprintf("0.0.0.0:%d", port))
+		server.httpRunning.Store(false)
 		if err != nil {
-			logger.Error("EPOS Server Error: ", err)
+			logger.Error("EPOS HTTP Server Error: ", err)
 		}
-		server.running.Store(false)
 		logger.Warn("HTTP server stopped")
 	}()
+
+	if httpsPort > 0 && certFile != "" && keyFile != "" {
+		server.httpsApp = newFiberApp(mgr)
+		server.httpsRunning.Store(true)
+		go func() {
+			logger.Infof("HTTPS server listening on 0.0.0.0:%d", httpsPort)
+			err := server.httpsApp.Listen(
+				fmt.Sprintf("0.0.0.0:%d", httpsPort),
+				fiber.ListenConfig{
+					CertFile:    certFile,
+					CertKeyFile: keyFile,
+				},
+			)
+			server.httpsRunning.Store(false)
+			if err != nil {
+				logger.Error("EPOS HTTPS Server Error: ", err)
+			}
+			logger.Warn("HTTPS server stopped")
+		}()
+	}
+
 	return server
 }
 
@@ -137,11 +222,28 @@ func printLabel(mgr *printer.Manager, ctx fiber.Ctx, printerID string) error {
 }
 
 func (s *Server) Stop() error {
-	logger.Infof("Stopping HTTP server")
-	s.running.Store(false)
-	return s.app.Shutdown()
+	logger.Infof("Stopping proxy servers")
+	s.httpRunning.Store(false)
+	s.httpsRunning.Store(false)
+
+	var firstErr error
+	if s.app != nil {
+		if err := s.app.Shutdown(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.httpsApp != nil {
+		if err := s.httpsApp.Shutdown(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (s *Server) Running() bool {
-	return s.running.Load()
+	return s.httpRunning.Load() || s.httpsRunning.Load()
+}
+
+func (s *Server) HTTPSRunning() bool {
+	return s.httpsApp != nil && s.httpsRunning.Load()
 }

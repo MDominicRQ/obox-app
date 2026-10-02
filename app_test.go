@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,11 +42,27 @@ func (f *fakeDialogs) SaveFile(_ context.Context, opts wailsruntime.SaveDialogOp
 	return f.savePath, f.saveErr
 }
 
+func TestProbeProxyURL(t *testing.T) {
+	okServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer okServer.Close()
+	testutil.ExpectedNoError(t, probeProxyURL(okServer.URL))
+
+	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	}))
+	defer badServer.Close()
+	testutil.ExpectedError(t, probeProxyURL(badServer.URL))
+}
+
 func TestNewApp(t *testing.T) {
 	app := NewApp()
 	testutil.ExpectedNotNil(t, app)
 	testutil.ExpectedNotNil(t, app.autoStart)
 	testutil.ExpectedNotNil(t, app.printerManager)
+	testutil.ExpectedTrue(t, len(app.autoStart.Exec) >= 2, "expected autostart command to include background flag")
+	testutil.ExpectedEqual(t, app.autoStart.Exec[len(app.autoStart.Exec)-1], "--background")
 }
 
 func TestApp_AppVariableAndPrintersAndGetPrinterUrl(t *testing.T) {
@@ -85,6 +103,46 @@ func TestApp_AppVariableAndPrintersAndGetPrinterUrl(t *testing.T) {
 		}
 	}
 	testutil.ExpectedTrue(t, foundLAN, "Expected to find configured LAN printer in printer status")
+}
+
+func TestApp_GetPrinterHTTPSUrl(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := config.NewManager()
+	testutil.ExpectedNoError(t, err)
+
+	srv := &server.Server{Port: 4545, HTTPSPort: 4645}
+	app := &App{config: cfg, webserver: srv}
+
+	id := "bDoxOTIuMTY4LjEuMzM"
+	expectedHost := util.GetLocalIP(app.IsNetworkPrintingEnabled())
+	testutil.ExpectedEqual(t, app.GetPrinterUrl(id), fmt.Sprintf("%s:4545/p/%s", expectedHost, id))
+	testutil.ExpectedEqual(t, app.GetPrinterHTTPSUrl(id), fmt.Sprintf("%s:4645/p/%s", expectedHost, id))
+}
+
+func TestApp_GetPrinterNetworkUrls(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := config.NewManager()
+	testutil.ExpectedNoError(t, err)
+
+	srv := &server.Server{Port: 4545, HTTPSPort: 4645}
+	app := &App{config: cfg, webserver: srv}
+	id := "bDoxOTIuMTY4LjEuMzM"
+
+	testutil.ExpectedEqual(t, app.GetPrinterNetworkUrl(id), "")
+	testutil.ExpectedEqual(t, app.GetPrinterNetworkHTTPSUrl(id), "")
+
+	testutil.ExpectedNoError(t, cfg.SetNetworkPrintingEnabled(true))
+	host := util.GetLocalIP(true)
+	if host == util.LOCALHOST_IP {
+		testutil.ExpectedEqual(t, app.GetPrinterNetworkUrl(id), "")
+		testutil.ExpectedEqual(t, app.GetPrinterNetworkHTTPSUrl(id), "")
+		return
+	}
+
+	testutil.ExpectedEqual(t, app.GetPrinterNetworkUrl(id), fmt.Sprintf("%s:4545/p/%s", host, id))
+	testutil.ExpectedEqual(t, app.GetPrinterNetworkHTTPSUrl(id), fmt.Sprintf("%s:4645/p/%s", host, id))
 }
 
 func TestApp_AddLANPrinter(t *testing.T) {

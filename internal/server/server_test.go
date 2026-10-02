@@ -2,13 +2,18 @@ package server
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
+	"time"
 
+	"epos-proxy/internal/certs"
 	"epos-proxy/internal/printer"
 	"epos-proxy/internal/testutil"
 )
@@ -168,7 +173,7 @@ func TestCORSHeaders(t *testing.T) {
 	testutil.ExpectedNoError(t, err)
 
 	allowOrigin := resp.Header.Get("Access-Control-Allow-Origin")
-	testutil.ExpectedEqual(t, allowOrigin, "*")
+	testutil.ExpectedEqual(t, allowOrigin, "http://example.com")
 }
 
 func TestPrintData_AutoSelectRoute(t *testing.T) {
@@ -213,6 +218,198 @@ func TestPrintData_AutoSelectRoute(t *testing.T) {
 			for _, expected := range tc.expected {
 				testutil.ExpectedContains(t, string(body), expected)
 			}
+		})
+	}
+}
+
+
+func TestPrinterBaseRouteIsBrowserTestable(t *testing.T) {
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	for _, path := range []string{"/", "/healthz", "/p/test-printer", "/p/test-printer/"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		resp, err := s.app.Test(req)
+		testutil.ExpectedNoError(t, err)
+		testutil.ExpectedEqual(t, resp.StatusCode, http.StatusOK)
+
+		body, err := io.ReadAll(resp.Body)
+		testutil.ExpectedNoError(t, err)
+		testutil.ExpectedContains(t, string(body), `"status":"ok"`)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/p/test-printer", nil)
+	resp, err := s.app.Test(req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `"printerId":"test-printer"`)
+	testutil.ExpectedContains(t, string(body), "ePOS Proxy printer endpoint is reachable")
+}
+
+func TestEPOSConnectivityCheckRoutes(t *testing.T) {
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	for _, path := range []string{
+		"/cgi-bin/epos/service.cgi?devid=local_printer",
+		"/p/test-printer/cgi-bin/epos/service.cgi?devid=local_printer",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		resp, err := s.app.Test(req)
+		testutil.ExpectedNoError(t, err)
+		testutil.ExpectedEqual(t, resp.StatusCode, http.StatusOK)
+
+		body, err := io.ReadAll(resp.Body)
+		testutil.ExpectedNoError(t, err)
+		testutil.ExpectedEqual(t, len(body), 0)
+	}
+}
+
+func TestServer_HTTPAndHTTPSCORSPreflight(t *testing.T) {
+	httpPort := testutil.GetFreePort(t)
+	httpsPort := testutil.GetFreePort(t)
+	for httpsPort == httpPort {
+		httpsPort = testutil.GetFreePort(t)
+	}
+
+	paths, err := certs.Ensure(t.TempDir(), "127.0.0.1")
+	testutil.ExpectedNoError(t, err)
+
+	mgr := printer.NewManager()
+	s := NewWithTLS(httpPort, httpsPort, paths.ServerCert, paths.ServerKey, mgr)
+	defer s.Stop()
+
+	caPEM, err := os.ReadFile(paths.CACert)
+	testutil.ExpectedNoError(t, err)
+	pool := x509.NewCertPool()
+	testutil.ExpectedTrue(t, pool.AppendCertsFromPEM(caPEM), "Expected CA certificate to be added to pool")
+
+	httpsClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				RootCAs:    pool,
+			},
+		},
+		Timeout: 2 * time.Second,
+	}
+
+	for _, tc := range []struct {
+		name   string
+		url    string
+		client *http.Client
+	}{
+		{
+			name:   "http",
+			url:    fmt.Sprintf("http://127.0.0.1:%d/cgi-bin/epos/service.cgi", httpPort),
+			client: &http.Client{Timeout: 2 * time.Second},
+		},
+		{
+			name:   "https",
+			url:    fmt.Sprintf("https://127.0.0.1:%d/cgi-bin/epos/service.cgi", httpsPort),
+			client: httpsClient,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var lastErr error
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				req, err := http.NewRequest(http.MethodOptions, tc.url, nil)
+				testutil.ExpectedNoError(t, err)
+				req.Header.Set("Origin", "https://odoo.example")
+				req.Header.Set("Access-Control-Request-Method", "POST")
+				req.Header.Set("Access-Control-Request-Private-Network", "true")
+
+				resp, err := tc.client.Do(req)
+				if err != nil {
+					lastErr = err
+					time.Sleep(25 * time.Millisecond)
+					continue
+				}
+				_ = resp.Body.Close()
+
+				testutil.ExpectedEqual(t, resp.Header.Get("Access-Control-Allow-Origin"), "https://odoo.example")
+				testutil.ExpectedEqual(t, resp.Header.Get("Access-Control-Allow-Private-Network"), "true")
+				return
+			}
+			t.Fatalf("%s endpoint did not become ready for CORS preflight: %v", tc.name, lastErr)
+		})
+	}
+}
+
+func TestServer_HTTPAndHTTPSEndpoints(t *testing.T) {
+	httpPort := testutil.GetFreePort(t)
+	httpsPort := testutil.GetFreePort(t)
+	for httpsPort == httpPort {
+		httpsPort = testutil.GetFreePort(t)
+	}
+
+	paths, err := certs.Ensure(t.TempDir(), "127.0.0.1")
+	testutil.ExpectedNoError(t, err)
+
+	mgr := printer.NewManager()
+	s := NewWithTLS(httpPort, httpsPort, paths.ServerCert, paths.ServerKey, mgr)
+	defer s.Stop()
+
+	caPEM, err := os.ReadFile(paths.CACert)
+	testutil.ExpectedNoError(t, err)
+	pool := x509.NewCertPool()
+	testutil.ExpectedTrue(t, pool.AppendCertsFromPEM(caPEM), "Expected CA certificate to be added to pool")
+
+	httpsClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				RootCAs:    pool,
+			},
+		},
+		Timeout: 2 * time.Second,
+	}
+
+	for _, tc := range []struct {
+		name   string
+		url    string
+		client *http.Client
+	}{
+		{
+			name:   "http",
+			url:    fmt.Sprintf("http://127.0.0.1:%d/cgi-bin/epos/service.cgi", httpPort),
+			client: &http.Client{Timeout: 2 * time.Second},
+		},
+		{
+			name:   "https",
+			url:    fmt.Sprintf("https://127.0.0.1:%d/cgi-bin/epos/service.cgi", httpsPort),
+			client: httpsClient,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var lastErr error
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				req, err := http.NewRequest(http.MethodPost, tc.url, bytes.NewReader([]byte("<invalid />")))
+				testutil.ExpectedNoError(t, err)
+				req.Header.Set("Content-Type", "text/xml")
+
+				resp, err := tc.client.Do(req)
+				if err != nil {
+					lastErr = err
+					time.Sleep(25 * time.Millisecond)
+					continue
+				}
+
+				body, readErr := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				testutil.ExpectedNoError(t, readErr)
+				testutil.ExpectedEqual(t, resp.StatusCode, http.StatusOK)
+				testutil.ExpectedContains(t, string(body), `code="SchemaError"`)
+				return
+			}
+			t.Fatalf("%s endpoint did not become ready: %v", tc.name, lastErr)
 		})
 	}
 }

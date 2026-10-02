@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 
+	"epos-proxy/internal/certs"
 	"epos-proxy/internal/config"
 	"epos-proxy/internal/logger"
 	"epos-proxy/internal/printer"
@@ -38,12 +42,13 @@ func (runtimeDialogs) SaveFile(ctx context.Context, opts wailsruntime.SaveDialog
 
 // App struct
 type App struct {
-	ctx            context.Context
-	webserver      *server.Server
-	config         *config.Manager
-	printerManager *printer.Manager
-	autoStart      *autostart.App
-	dialogs        dialoger
+	ctx             context.Context
+	webserver       *server.Server
+	config          *config.Manager
+	printerManager  *printer.Manager
+	autoStart       *autostart.App
+	dialogs         dialoger
+	httpsCACertPath string
 }
 
 // dlg returns the dialog backend, defaulting to the Wails runtime so an App
@@ -67,13 +72,16 @@ func (a *App) showError(title, message string) {
 }
 
 type Printer struct {
-	Name   string `json:"name"`
-	Ip     string `json:"ip"`
-	Id     string `json:"id"`
-	IsLAN  bool   `json:"isLAN"`
-	LANIp  string `json:"lanIp,omitempty"`
-	Online bool   `json:"online"`
-	Type   string `json:"type"`
+	Name           string `json:"name"`
+	Ip             string `json:"ip"`
+	HTTPSIp        string `json:"httpsIp,omitempty"`
+	NetworkIp      string `json:"networkIp,omitempty"`
+	NetworkHTTPSIp string `json:"networkHttpsIp,omitempty"`
+	Id             string `json:"id"`
+	IsLAN          bool   `json:"isLAN"`
+	LANIp          string `json:"lanIp,omitempty"`
+	Online         bool   `json:"online"`
+	Type           string `json:"type"`
 }
 
 type UnavailablePrinter struct {
@@ -100,7 +108,7 @@ func NewApp() *App {
 	a.autoStart = &autostart.App{
 		Name:        "epos-proxy",
 		DisplayName: "ePOS Proxy",
-		Exec:        []string{os.Args[0]},
+		Exec:        []string{os.Args[0], "--background"},
 	}
 	a.printerManager = printer.NewManager()
 	a.dialogs = runtimeDialogs{}
@@ -124,17 +132,48 @@ func (a *App) startup(ctx context.Context) {
 	logger.Debugf("Application startup")
 	logger.Debugf("Config loaded from %s", a.config.Path())
 
+	a.triggerLocalNetworkPermissionProbe()
+
 	port, err := a.config.ResolvePort()
 	if err != nil {
-		logger.Warn("Unable to resolve port, using default")
+		logger.Errorf("Unable to resolve HTTP port: %v", err)
+		a.webserver = server.New(port, a.printerManager)
+		return
 	}
 
-	a.webserver = server.New(port, a.printerManager)
+	httpsPort, err := a.config.ResolveHTTPSPort(port)
+	if err != nil {
+		logger.Warnf("HTTPS disabled because no HTTPS port could be resolved: %v", err)
+		a.webserver = server.New(port, a.printerManager)
+		return
+	}
+
+	lanIPs := util.GetLocalIPv4Addresses()
+	logger.Infof("Local IPv4 addresses available for HTTPS SANs: %v", lanIPs)
+
+	certPaths, err := certs.Ensure(filepath.Dir(a.config.Path()), lanIPs...)
+	if err != nil {
+		logger.Warnf("HTTPS disabled because local certificates could not be prepared: %v", err)
+		a.webserver = server.New(port, a.printerManager)
+		return
+	}
+
+	a.httpsCACertPath = certPaths.CACert
+	a.webserver = server.NewWithTLS(
+		port,
+		httpsPort,
+		certPaths.ServerCert,
+		certPaths.ServerKey,
+		a.printerManager,
+	)
 }
 
 func (a *App) shutdown(ctx context.Context) {
 	logger.Infof("Stopping proxy server")
 
+	if a.webserver == nil {
+		return
+	}
 	if err := a.webserver.Stop(); err != nil {
 		logger.Errorf("Server stop error: %v", err)
 	}
@@ -148,8 +187,46 @@ func (a *App) AppVariable() AppVariable {
 }
 
 func (a *App) GetPrinterUrl(id string) string {
-	url := fmt.Sprintf("%s:%d/p/%s", util.GetLocalIP(a.config.IsNetworkPrintingEnabled()), a.webserver.Port, id)
-	logger.Debugf("Generated printer endpoint: %s", url)
+	if a.webserver == nil {
+		return ""
+	}
+	url := fmt.Sprintf("%s:%d/p/%s", util.LOCALHOST_IP, a.webserver.Port, id)
+	logger.Debugf("Generated local HTTP printer endpoint: %s", url)
+	return url
+}
+
+func (a *App) GetPrinterHTTPSUrl(id string) string {
+	if a.webserver == nil || a.webserver.HTTPSPort <= 0 {
+		return ""
+	}
+	url := fmt.Sprintf("%s:%d/p/%s", util.LOCALHOST_IP, a.webserver.HTTPSPort, id)
+	logger.Debugf("Generated local HTTPS printer endpoint: %s", url)
+	return url
+}
+
+func (a *App) GetPrinterNetworkUrl(id string) string {
+	if a.webserver == nil || !a.config.IsNetworkPrintingEnabled() {
+		return ""
+	}
+	host := util.GetLocalIP(true)
+	if host == util.LOCALHOST_IP {
+		return ""
+	}
+	url := fmt.Sprintf("%s:%d/p/%s", host, a.webserver.Port, id)
+	logger.Debugf("Generated LAN HTTP printer endpoint: %s", url)
+	return url
+}
+
+func (a *App) GetPrinterNetworkHTTPSUrl(id string) string {
+	if a.webserver == nil || a.webserver.HTTPSPort <= 0 || !a.config.IsNetworkPrintingEnabled() {
+		return ""
+	}
+	host := util.GetLocalIP(true)
+	if host == util.LOCALHOST_IP {
+		return ""
+	}
+	url := fmt.Sprintf("%s:%d/p/%s", host, a.webserver.HTTPSPort, id)
+	logger.Debugf("Generated LAN HTTPS printer endpoint: %s", url)
 	return url
 }
 
@@ -168,11 +245,14 @@ func (a *App) Printers() Printers {
 
 		for _, info := range printerInfos.Available {
 			printers = append(printers, Printer{
-				Id:     info.Id,
-				Name:   info.Name,
-				Ip:     a.GetPrinterUrl(info.Id),
-				Online: true,
-				Type:   string(info.Type),
+				Id:             info.Id,
+				Name:           info.Name,
+				Ip:             a.GetPrinterUrl(info.Id),
+				HTTPSIp:        a.GetPrinterHTTPSUrl(info.Id),
+				NetworkIp:      a.GetPrinterNetworkUrl(info.Id),
+				NetworkHTTPSIp: a.GetPrinterNetworkHTTPSUrl(info.Id),
+				Online:         true,
+				Type:           string(info.Type),
 			})
 		}
 
@@ -193,12 +273,15 @@ func (a *App) Printers() Printers {
 
 	for _, info := range lanPrinters {
 		printers = append(printers, Printer{
-			Id:    info.Id,
-			Name:  fmt.Sprintf("Network - %s", info.IP),
-			Ip:    a.GetPrinterUrl(info.Id),
-			IsLAN: true,
-			LANIp: info.IP,
-			Type:  string(printer.TypeReceipt),
+			Id:             info.Id,
+			Name:           fmt.Sprintf("Network - %s", info.IP),
+			Ip:             a.GetPrinterUrl(info.Id),
+			HTTPSIp:        a.GetPrinterHTTPSUrl(info.Id),
+			NetworkIp:      a.GetPrinterNetworkUrl(info.Id),
+			NetworkHTTPSIp: a.GetPrinterNetworkHTTPSUrl(info.Id),
+			IsLAN:          true,
+			LANIp:          info.IP,
+			Type:           string(printer.TypeReceipt),
 		})
 	}
 
@@ -294,6 +377,164 @@ func (a *App) DownloadLogs() {
 	logger.Infof("Logs successfully exported to: %s", savePath)
 }
 
+func (a *App) triggerLocalNetworkPermissionProbe() {
+	if runtime.GOOS != "darwin" || a.config == nil {
+		return
+	}
+
+	ips := a.config.GetLANPrinters()
+	if len(ips) == 0 {
+		return
+	}
+
+	go func() {
+		time.Sleep(750 * time.Millisecond)
+		for _, ip := range ips {
+			logger.Infof("Probing configured LAN printer %s to request/verify macOS Local Network access", ip)
+			if err := printer.CheckLANPrinter(ip); err != nil {
+				logger.Warnf("LAN permission/connectivity probe failed for %s:%d: %v", ip, printer.LANPort, err)
+				continue
+			}
+			logger.Infof("LAN permission/connectivity probe succeeded for %s:%d", ip, printer.LANPort)
+		}
+	}()
+}
+
+func macOSFirewallStatus() string {
+	if runtime.GOOS != "darwin" {
+		return "not applicable"
+	}
+
+	out, err := exec.Command(
+		"/usr/libexec/ApplicationFirewall/socketfilterfw",
+		"--getglobalstate",
+	).CombinedOutput()
+	if err != nil {
+		if len(out) > 0 {
+			return "unknown: " + string(out)
+		}
+		return "unknown: " + err.Error()
+	}
+	return string(out)
+}
+
+func probeProxyURL(rawURL string) error {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(rawURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("unexpected HTTP status %s", resp.Status)
+	}
+	return nil
+}
+
+func (a *App) ShowProxyDiagnostics() {
+	if a.webserver == nil {
+		a.showError("Proxy Diagnostics", "The proxy server has not started.")
+		return
+	}
+
+	httpURL := fmt.Sprintf("http://%s:%d/healthz", util.LOCALHOST_IP, a.webserver.Port)
+	httpsURL := ""
+	if a.webserver.HTTPSPort > 0 {
+		httpsURL = fmt.Sprintf("https://%s:%d/healthz", util.LOCALHOST_IP, a.webserver.HTTPSPort)
+	}
+
+	httpStatus := "OK"
+	if err := probeProxyURL(httpURL); err != nil {
+		httpStatus = "FAILED: " + err.Error()
+	}
+
+	httpsStatus := "disabled"
+	if httpsURL != "" {
+		httpsStatus = "OK"
+		if err := probeProxyURL(httpsURL); err != nil {
+			httpsStatus = "FAILED: " + err.Error()
+		}
+	}
+
+	lanHost := util.GetLocalIP(true)
+	lanHTTPURL := ""
+	lanHTTPStatus := "unavailable"
+	if lanHost != "" && lanHost != util.LOCALHOST_IP {
+		lanHTTPURL = fmt.Sprintf("http://%s:%d/healthz", lanHost, a.webserver.Port)
+		lanHTTPStatus = "OK"
+		if err := probeProxyURL(lanHTTPURL); err != nil {
+			lanHTTPStatus = "FAILED: " + err.Error()
+		}
+	}
+
+	printerLines := ""
+	for _, ip := range a.config.GetLANPrinters() {
+		status := "OK"
+		if err := printer.CheckLANPrinter(ip); err != nil {
+			status = "FAILED: " + err.Error()
+		}
+		printerLines += fmt.Sprintf("\nPrinter %s:%d: %s", ip, printer.LANPort, status)
+	}
+	if printerLines == "" {
+		printerLines = "\nNo LAN printers are configured."
+	}
+
+	message := fmt.Sprintf(
+		"Local HTTP: %s\n%s\n\nLocal HTTPS: %s\n%s\n\nLAN HTTP self-check: %s\n%s\n\nLAN printer connectivity:%s\n\nmacOS Application Firewall: %s\n\nFor a remote Odoo/POS, the LAN HTTP URL is the relevant proxy endpoint. If the LAN self-check is OK but another computer cannot open it, check System Settings → Network → Firewall → Options and allow ePOS Proxy. If a printer check fails on macOS 15+, enable ePOS Proxy under System Settings → Privacy & Security → Local Network.",
+		httpStatus,
+		httpURL,
+		httpsStatus,
+		httpsURL,
+		lanHTTPStatus,
+		lanHTTPURL,
+		printerLines,
+		macOSFirewallStatus(),
+	)
+
+	if _, err := a.dlg().Message(a.ctx, wailsruntime.MessageDialogOptions{
+		Type:    wailsruntime.InfoDialog,
+		Title:   "Proxy Diagnostics",
+		Message: message,
+	}); err != nil {
+		logger.Errorf("Failed to show proxy diagnostics: %v", err)
+	}
+}
+
+func (a *App) InstallHTTPSCertificate() error {
+	if a.httpsCACertPath == "" {
+		return fmt.Errorf("HTTPS certificate is not available; check the application logs for TLS startup errors")
+	}
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", a.httpsCACertPath)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", a.httpsCACertPath)
+	default:
+		cmd = exec.Command("xdg-open", a.httpsCACertPath)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("open HTTPS CA certificate: %w", err)
+	}
+
+	message := "The ePOS Proxy local CA certificate has been opened. Mark it as trusted in your operating system before using the HTTPS address from Odoo."
+	if runtime.GOOS == "darwin" {
+		message = "The ePOS Proxy local CA certificate has been opened in Keychain Access. Import it, open 'ePOS Proxy Local CA', expand Trust, and set 'When using this certificate' to 'Always Trust'. macOS may request an administrator password. ePOS Proxy does not run privileged trust commands silently."
+	}
+
+	_, err := a.dlg().Message(a.ctx, wailsruntime.MessageDialogOptions{
+		Type:    wailsruntime.InfoDialog,
+		Title:   "Trust HTTPS Certificate",
+		Message: message,
+	})
+	if err != nil {
+		return fmt.Errorf("show HTTPS certificate instructions: %w", err)
+	}
+	return nil
+}
+
 func (a *App) IsAutostartEnabled() bool {
 	return a.autoStart.IsEnabled()
 }
@@ -335,12 +576,15 @@ func (a *App) IsNetworkPrintingEnabled() bool {
 }
 
 type TroubleshootInfo struct {
-	ActiveFirewall string `json:"activeFirewall"`
-	FirewallZone   string `json:"firewallZone"`
-	Port           int    `json:"port"`
-	Subnet         string `json:"subnet"`
-	LocalIP        string `json:"localIp"`
-	ExecPath       string `json:"execPath"`
+	ActiveFirewall string   `json:"activeFirewall"`
+	FirewallZone   string   `json:"firewallZone"`
+	Port           int      `json:"port"`
+	HTTPSPort      int      `json:"httpsPort"`
+	HTTPSCACert    string   `json:"httpsCaCert"`
+	Subnet         string   `json:"subnet"`
+	LocalIP        string   `json:"localIp"`
+	LocalIPv4s     []string `json:"localIPv4s"`
+	ExecPath       string   `json:"execPath"`
 }
 
 func (a *App) GetTroubleshootInfo() TroubleshootInfo {
@@ -350,8 +594,11 @@ func (a *App) GetTroubleshootInfo() TroubleshootInfo {
 		ActiveFirewall: netInfo.ActiveFirewall,
 		FirewallZone:   netInfo.Zone,
 		Port:           a.config.GetPort(),
+		HTTPSPort:      a.config.GetHTTPSPort(),
+		HTTPSCACert:    a.httpsCACertPath,
 		Subnet:         netInfo.Subnet,
 		LocalIP:        netInfo.IP,
+		LocalIPv4s:     util.GetLocalIPv4Addresses(),
 		ExecPath:       execPath,
 	}
 }

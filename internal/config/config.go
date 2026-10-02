@@ -16,12 +16,15 @@ var ErrNoAvailablePort = errors.New("no available port in range")
 const AppName = "EposProxy"
 
 const (
-	PortRangeStart = 4545
-	PortRangeEnd   = 4555
+	PortRangeStart      = 4545
+	PortRangeEnd        = 4555
+	HTTPSPortRangeStart = 4645
+	HTTPSPortRangeEnd   = 4655
 )
 
 type AppConfig struct {
 	Port            int      `json:"port"`
+	HTTPSPort       int      `json:"https_port,omitempty"`
 	LANPrinters     []string `json:"lan_printers,omitempty"`
 	NetworkPrinting bool     `json:"network_printing"`
 }
@@ -29,6 +32,7 @@ type AppConfig struct {
 func defaults() AppConfig {
 	return AppConfig{
 		Port:            0,
+		HTTPSPort:       0,
 		NetworkPrinting: false,
 	}
 }
@@ -68,9 +72,11 @@ func (cm *Manager) Load() error {
 		return fmt.Errorf("config read error: %w", err)
 	}
 
-	if err := json.Unmarshal(data, &cm.Data); err != nil {
+	loaded := defaults()
+	if err := json.Unmarshal(data, &loaded); err != nil {
 		return fmt.Errorf("config parse error: %w", err)
 	}
+	cm.Data = loaded
 	return nil
 }
 
@@ -94,7 +100,7 @@ func (cm *Manager) saveLocked() error {
 func (cm *Manager) Path() string { return cm.path }
 
 func isPortAvailable(port int) bool {
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
 		return false
 	}
@@ -103,8 +109,12 @@ func isPortAvailable(port int) bool {
 }
 
 func findAvailablePort(start, end int) (int, error) {
+	return findAvailablePortExcluding(start, end, 0)
+}
+
+func findAvailablePortExcluding(start, end, excluded int) (int, error) {
 	for p := start; p <= end; p++ {
-		if isPortAvailable(p) {
+		if p != excluded && isPortAvailable(p) {
 			return p, nil
 		}
 	}
@@ -136,6 +146,32 @@ func (cm *Manager) GetPort() int {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 	return cm.Data.Port
+}
+
+func (cm *Manager) ResolveHTTPSPort(httpPort int) (int, error) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	if cm.Data.HTTPSPort > 0 && cm.Data.HTTPSPort != httpPort && isPortAvailable(cm.Data.HTTPSPort) {
+		return cm.Data.HTTPSPort, nil
+	}
+
+	port, err := findAvailablePortExcluding(HTTPSPortRangeStart, HTTPSPortRangeEnd, httpPort)
+	if err != nil {
+		return 0, err
+	}
+
+	cm.Data.HTTPSPort = port
+	if err := cm.saveLocked(); err != nil {
+		log.Printf("[config] warning: could not save HTTPS port: %v\n", err)
+	}
+	return port, nil
+}
+
+func (cm *Manager) GetHTTPSPort() int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.Data.HTTPSPort
 }
 
 func (cm *Manager) SetNetworkPrintingEnabled(enabled bool) error {
