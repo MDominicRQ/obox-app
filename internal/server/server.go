@@ -35,12 +35,22 @@ func newFiberApp(mgr *printer.Manager) *fiber.App {
 		AppName: "ePOS proxy",
 	})
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:        []string{"*"},
+		AllowOriginsFunc: func(origin string) bool {
+			return origin != ""
+		},
 		AllowPrivateNetwork: true,
 	}))
 
 	app.Get("/", func(ctx fiber.Ctx) error {
 		return ctx.SendString(fmt.Sprintf("Hello from %s", app.Config().AppName))
+	})
+
+	app.Get("/p/:printerId/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
+		return ctx.Status(fiber.StatusOK).Send([]byte{})
+	})
+
+	app.Get("/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
+		return ctx.Status(fiber.StatusOK).Send([]byte{})
 	})
 
 	app.Post("/p/:printerId/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
