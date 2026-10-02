@@ -4,10 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"net/http"
 	"time"
 
 	"epos-proxy/internal/certs"
@@ -243,14 +244,14 @@ func (a *App) Printers() Printers {
 
 		for _, info := range printerInfos.Available {
 			printers = append(printers, Printer{
-				Id:      info.Id,
-				Name:    info.Name,
+				Id:             info.Id,
+				Name:           info.Name,
 				Ip:             a.GetPrinterUrl(info.Id),
 				HTTPSIp:        a.GetPrinterHTTPSUrl(info.Id),
 				NetworkIp:      a.GetPrinterNetworkUrl(info.Id),
 				NetworkHTTPSIp: a.GetPrinterNetworkHTTPSUrl(info.Id),
 				Online:         true,
-				Type:    string(info.Type),
+				Type:           string(info.Type),
 			})
 		}
 
@@ -271,15 +272,15 @@ func (a *App) Printers() Printers {
 
 	for _, info := range lanPrinters {
 		printers = append(printers, Printer{
-			Id:      info.Id,
-			Name:    fmt.Sprintf("Network - %s", info.IP),
+			Id:             info.Id,
+			Name:           fmt.Sprintf("Network - %s", info.IP),
 			Ip:             a.GetPrinterUrl(info.Id),
 			HTTPSIp:        a.GetPrinterHTTPSUrl(info.Id),
 			NetworkIp:      a.GetPrinterNetworkUrl(info.Id),
 			NetworkHTTPSIp: a.GetPrinterNetworkHTTPSUrl(info.Id),
 			IsLAN:          true,
-			LANIp:   info.IP,
-			Type:    string(printer.TypeReceipt),
+			LANIp:          info.IP,
+			Type:           string(printer.TypeReceipt),
 		})
 	}
 
