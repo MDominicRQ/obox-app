@@ -5,6 +5,7 @@ import (
 	"encoding/pem"
 	"net"
 	"os"
+	"runtime"
 	"testing"
 )
 
@@ -85,6 +86,10 @@ func TestEnsureRegeneratesOnlyServerCertificateWhenLANIPChanges(t *testing.T) {
 }
 
 func TestEnsureUsesExpectedPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose Unix permission bits consistently")
+	}
+
 	paths, err := Ensure(t.TempDir(), "127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
