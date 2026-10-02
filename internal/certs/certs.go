@@ -29,7 +29,7 @@ type Paths struct {
 	ServerKey  string
 }
 
-func Ensure(baseDir, lanIP string) (Paths, error) {
+func Ensure(baseDir string, lanIPs ...string) (Paths, error) {
 	paths := Paths{
 		Dir:        filepath.Join(baseDir, "certs"),
 		CACert:     filepath.Join(baseDir, "certs", "epos-proxy-ca.crt"),
@@ -47,7 +47,7 @@ func Ensure(baseDir, lanIP string) (Paths, error) {
 		return paths, err
 	}
 
-	if err := ensureServerCertificate(paths, caCert, caKey, lanIP); err != nil {
+	if err := ensureServerCertificate(paths, caCert, caKey, lanIPs); err != nil {
 		return paths, err
 	}
 
@@ -132,8 +132,8 @@ func ensureCA(paths Paths) (*x509.Certificate, *rsa.PrivateKey, error) {
 	return cert, key, nil
 }
 
-func ensureServerCertificate(paths Paths, caCert *x509.Certificate, caKey *rsa.PrivateKey, lanIP string) error {
-	if serverCertificateIsCurrent(paths, caCert, lanIP) {
+func ensureServerCertificate(paths Paths, caCert *x509.Certificate, caKey *rsa.PrivateKey, lanIPs []string) error {
+	if serverCertificateIsCurrent(paths, caCert, lanIPs) {
 		if err := os.Chmod(paths.ServerKey, 0o600); err != nil {
 			return fmt.Errorf("secure HTTPS server key permissions: %w", err)
 		}
@@ -161,10 +161,7 @@ func ensureServerCertificate(paths Paths, caCert *x509.Certificate, caKey *rsa.P
 		return errors.New("local HTTPS CA expires too soon to issue a server certificate")
 	}
 
-	ips := []net.IP{net.ParseIP("127.0.0.1")}
-	if ip := net.ParseIP(lanIP); ip != nil && !ip.IsLoopback() {
-		ips = append(ips, ip)
-	}
+	ips := certificateIPs(lanIPs)
 
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
@@ -194,7 +191,7 @@ func ensureServerCertificate(paths Paths, caCert *x509.Certificate, caKey *rsa.P
 	return nil
 }
 
-func serverCertificateIsCurrent(paths Paths, caCert *x509.Certificate, lanIP string) bool {
+func serverCertificateIsCurrent(paths Paths, caCert *x509.Certificate, lanIPs []string) bool {
 	if !fileExists(paths.ServerCert) || !fileExists(paths.ServerKey) {
 		return false
 	}
@@ -216,8 +213,10 @@ func serverCertificateIsCurrent(paths Paths, caCert *x509.Certificate, lanIP str
 	if !containsString(cert.DNSNames, "localhost") || !containsIP(cert.IPAddresses, net.ParseIP("127.0.0.1")) {
 		return false
 	}
-	if ip := net.ParseIP(lanIP); ip != nil && !ip.IsLoopback() && !containsIP(cert.IPAddresses, ip) {
-		return false
+	for _, expected := range certificateIPs(lanIPs) {
+		if !containsIP(cert.IPAddresses, expected) {
+			return false
+		}
 	}
 	for _, usage := range cert.ExtKeyUsage {
 		if usage == x509.ExtKeyUsageServerAuth {
@@ -225,6 +224,28 @@ func serverCertificateIsCurrent(paths Paths, caCert *x509.Certificate, lanIP str
 		}
 	}
 	return false
+}
+
+func certificateIPs(lanIPs []string) []net.IP {
+	ips := []net.IP{net.ParseIP("127.0.0.1")}
+	seen := map[string]struct{}{"127.0.0.1": {}}
+
+	for _, raw := range lanIPs {
+		ip := net.ParseIP(raw)
+		if ip == nil || ip.IsLoopback() {
+			continue
+		}
+		if ip4 := ip.To4(); ip4 != nil {
+			ip = ip4
+		}
+		key := ip.String()
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		ips = append(ips, ip)
+	}
+	return ips
 }
 
 func readCertificate(path string) (*x509.Certificate, error) {
