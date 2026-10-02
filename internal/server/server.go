@@ -34,6 +34,18 @@ func newFiberApp(mgr *printer.Manager) *fiber.App {
 	app := fiber.New(fiber.Config{
 		AppName: "ePOS proxy",
 	})
+	app.Use(func(ctx fiber.Ctx) error {
+		logger.Debugf(
+			"Proxy request method=%s path=%s remote=%s origin=%q acrpn=%q",
+			ctx.Method(),
+			ctx.Path(),
+			ctx.IP(),
+			ctx.Get("Origin"),
+			ctx.Get("Access-Control-Request-Private-Network"),
+		)
+		return ctx.Next()
+	})
+
 	app.Use(cors.New(cors.Config{
 		AllowOriginsFunc: func(origin string) bool {
 			return origin != ""
