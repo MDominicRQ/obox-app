@@ -23,6 +23,11 @@ func createMenu(app *App) *menu.Menu {
 		wailsruntime.WindowUnminimise(app.ctx)
 	})
 
+	appMenu.AddText("Run in Background", nil, func(_ *menu.CallbackData) {
+		logger.Infof("Hiding application window; proxy remains running in background")
+		wailsruntime.WindowHide(app.ctx)
+	})
+
 	appMenu.AddCheckbox("Auto Start", app.IsAutostartEnabled(), nil, func(cb *menu.CallbackData) {
 		handleAutoStartToggle(app, cb)
 	})
