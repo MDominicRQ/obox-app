@@ -173,7 +173,7 @@ func TestCORSHeaders(t *testing.T) {
 	testutil.ExpectedNoError(t, err)
 
 	allowOrigin := resp.Header.Get("Access-Control-Allow-Origin")
-	testutil.ExpectedEqual(t, allowOrigin, "*")
+	testutil.ExpectedEqual(t, allowOrigin, "http://example.com")
 }
 
 func TestPrintData_AutoSelectRoute(t *testing.T) {
@@ -222,6 +222,27 @@ func TestPrintData_AutoSelectRoute(t *testing.T) {
 	}
 }
 
+
+func TestEPOSConnectivityCheckRoutes(t *testing.T) {
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	for _, path := range []string{
+		"/cgi-bin/epos/service.cgi?devid=local_printer",
+		"/p/test-printer/cgi-bin/epos/service.cgi?devid=local_printer",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		resp, err := s.app.Test(req)
+		testutil.ExpectedNoError(t, err)
+		testutil.ExpectedEqual(t, resp.StatusCode, http.StatusOK)
+
+		body, err := io.ReadAll(resp.Body)
+		testutil.ExpectedNoError(t, err)
+		testutil.ExpectedEqual(t, len(body), 0)
+	}
+}
 
 func TestServer_HTTPAndHTTPSCORSPreflight(t *testing.T) {
 	httpPort := testutil.GetFreePort(t)
@@ -286,7 +307,7 @@ func TestServer_HTTPAndHTTPSCORSPreflight(t *testing.T) {
 				}
 				_ = resp.Body.Close()
 
-				testutil.ExpectedEqual(t, resp.Header.Get("Access-Control-Allow-Origin"), "*")
+				testutil.ExpectedEqual(t, resp.Header.Get("Access-Control-Allow-Origin"), "https://odoo.example")
 				testutil.ExpectedEqual(t, resp.Header.Get("Access-Control-Allow-Private-Network"), "true")
 				return
 			}
