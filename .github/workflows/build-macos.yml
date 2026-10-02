@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
 
   push:
-    branches:
-      - "feat/macos11-https-odoo"
     tags:
       - "*"
 
