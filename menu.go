@@ -18,6 +18,11 @@ func createMenu(app *App) *menu.Menu {
 		mainMenu.Append(menu.EditMenu())
 	}
 
+	appMenu.AddText("Show Window", nil, func(_ *menu.CallbackData) {
+		wailsruntime.WindowShow(app.ctx)
+		wailsruntime.WindowUnminimise(app.ctx)
+	})
+
 	appMenu.AddCheckbox("Auto Start", app.IsAutostartEnabled(), nil, func(cb *menu.CallbackData) {
 		handleAutoStartToggle(app, cb)
 	})
@@ -39,6 +44,10 @@ func createMenu(app *App) *menu.Menu {
 
 	appMenu.AddText("Quit", nil, func(_ *menu.CallbackData) {
 		logger.Infof("Quit requested by user")
+		if !app.ConfirmQuit() {
+			return
+		}
+		logger.Infof("User confirmed quit")
 		wailsruntime.Quit(app.ctx)
 	})
 
