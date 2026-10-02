@@ -87,6 +87,21 @@ func TestApp_AppVariableAndPrintersAndGetPrinterUrl(t *testing.T) {
 	testutil.ExpectedTrue(t, foundLAN, "Expected to find configured LAN printer in printer status")
 }
 
+func TestApp_GetPrinterHTTPSUrl(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := config.NewManager()
+	testutil.ExpectedNoError(t, err)
+
+	srv := &server.Server{Port: 4545, HTTPSPort: 4645}
+	app := &App{config: cfg, webserver: srv}
+
+	id := "bDoxOTIuMTY4LjEuMzM"
+	expectedHost := util.GetLocalIP(app.IsNetworkPrintingEnabled())
+	testutil.ExpectedEqual(t, app.GetPrinterUrl(id), fmt.Sprintf("%s:4545/p/%s", expectedHost, id))
+	testutil.ExpectedEqual(t, app.GetPrinterHTTPSUrl(id), fmt.Sprintf("%s:4645/p/%s", expectedHost, id))
+}
+
 func TestApp_AddLANPrinter(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Setenv("HOME", tempDir)
