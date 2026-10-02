@@ -66,14 +66,14 @@ export default function PrinterListItem({
           </div>
           <div className="mt-2 text-sm">
             <div className="text-xs font-medium uppercase tracking-wide text-gray-500">
-              Local HTTP / LNA
+              Local HTTP / LNA ON
             </div>
             <div className="text-gray-600 break-all">{printer.ip}</div>
 
             {printer.httpsIp && (
               <>
                 <div className="mt-2 text-xs font-medium uppercase tracking-wide text-gray-500">
-                  Local HTTPS / Legacy
+                  Local HTTPS / LNA OFF
                 </div>
                 <div className="text-gray-600 break-all">{printer.httpsIp}</div>
               </>
@@ -82,7 +82,7 @@ export default function PrinterListItem({
             {printer.networkIp && (
               <>
                 <div className="mt-3 text-xs font-medium uppercase tracking-wide text-gray-500">
-                  LAN HTTP / LNA
+                  LAN HTTP / LNA ON
                 </div>
                 <div className="text-gray-600 break-all">{printer.networkIp}</div>
               </>
@@ -91,7 +91,7 @@ export default function PrinterListItem({
             {printer.networkHttpsIp && (
               <>
                 <div className="mt-2 text-xs font-medium uppercase tracking-wide text-gray-500">
-                  LAN HTTPS / Legacy
+                  LAN HTTPS / LNA OFF
                 </div>
                 <div className="text-gray-600 break-all">
                   {printer.networkHttpsIp}
@@ -100,14 +100,21 @@ export default function PrinterListItem({
             )}
 
             <div className="mt-2 text-xs text-gray-500">
-              For Odoo 19 on current Chromium, prefer LAN HTTP / LNA and grant
-              the Odoo site Local Network access in the browser.
+              If Odoo runs in a browser on this Mac, prefer Local HTTP with LNA
+              enabled. Use Local HTTPS only with LNA disabled and after trusting
+              the ePOS Proxy CA certificate.
+            </div>
+
+            <div className="mt-1 text-xs text-gray-500">
+              LAN addresses are only needed when the POS browser is running on
+              another device. On modern macOS, also allow Local Network access
+              for that browser in System Settings when using a LAN address.
             </div>
 
             {!printerContext.data.networkPrintingEnabled && (
               <div className="mt-2 text-xs text-amber-700">
-                Enable App → Allow Network Printing to expose the recommended
-                LAN address.
+                App → Allow Network Printing is only required for access from
+                another device on the LAN.
               </div>
             )}
           </div>
