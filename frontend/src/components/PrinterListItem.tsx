@@ -64,8 +64,20 @@ export default function PrinterListItem({
               />
             )}
           </div>
-          <div className="text-gray-600 mt-2 text-sm break-all">
-            {printer.ip}
+          <div className="mt-2 text-sm">
+            <div className="text-xs font-medium uppercase tracking-wide text-gray-500">
+              HTTP / LNA
+            </div>
+            <div className="text-gray-600 break-all">{printer.ip}</div>
+
+            {printer.httpsIp && (
+              <>
+                <div className="mt-2 text-xs font-medium uppercase tracking-wide text-gray-500">
+                  HTTPS / Legacy macOS
+                </div>
+                <div className="text-gray-600 break-all">{printer.httpsIp}</div>
+              </>
+            )}
           </div>
           <PrinterActions printer={printer} />
         </li>
