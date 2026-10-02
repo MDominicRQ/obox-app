@@ -119,6 +119,35 @@ Closing the red window button hides the window instead of quitting. The proxy co
 - **Auto Start** launches the application with `--background`, so the proxy can start without opening the main window.
 - **App → Quit** is the explicit action that stops the process and both listeners.
 
+## Modern macOS LAN privacy and firewall
+
+On **macOS 15 and later**, Local Network privacy applies to outgoing connections made by ePOS Proxy to LAN printers. A LAN printer such as `192.168.1.33` therefore requires **ePOS Proxy** to be allowed under:
+
+```text
+System Settings → Privacy & Security → Local Network
+```
+
+The application proactively probes configured LAN printers on startup so macOS can present the permission prompt while the UI is running.
+
+This permission is separate from incoming access to the proxy. A remote Odoo workstation reaches ePOS Proxy through an incoming TCP connection. If the LAN URL works locally on the Mac but cannot be opened from the Odoo workstation, check:
+
+```text
+System Settings → Network → Firewall → Options
+```
+
+and allow incoming connections for ePOS Proxy. macOS can deny incoming connections until the firewall prompt is accepted.
+
+Use **App → Test Proxy Connections** to check:
+
+- local HTTP,
+- local HTTPS,
+- HTTP through the Mac's selected LAN address,
+- every configured LAN printer on TCP port 9100.
+
+The LAN printer result is especially important on macOS 15+: it verifies the path `ePOS Proxy → printer`, not just `browser → ePOS Proxy`.
+
+For CI/testing, the generated app is currently ad-hoc signed. Apple recommends an Apple-issued signing identity for reliable Local Network privacy identity tracking across builds. A production distribution should therefore use Developer ID signing/notarization rather than relying permanently on ad-hoc signing.
+
 ## Troubleshooting
 
 1. Keep ePOS Proxy running; closing the window is safe, but **App → Quit** stops printing.
