@@ -16,9 +16,17 @@ export function getMacSteps(info: main.TroubleshootInfo) {
   return [
     ...defaultSteps(info),
     {
+      title: "Odoo 19 + Chromium Local Network Access",
+      desc: "For Chrome/Chromium 142+, prefer the *LAN HTTP / LNA* address shown by ePOS Proxy and enable Odoo Local Network Access. In Chrome, open *Settings → Privacy and security → Site settings → Additional permissions → Local network* and allow your Odoo site.\n\nChrome 145+ separates LAN and loopback permissions, so a LAN address is the safest choice for modern Odoo. Use HTTPS only for legacy browser/macOS compatibility.",
+    },
+    {
       title: "macOS Application Firewall",
       desc: "macOS may block incoming network access to ePOS Proxy through its built-in Application Firewall.\n\nYou can allow it in *System Settings → Privacy & Security → Firewall*, or run this in Terminal:",
       codes: [`sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp "/Applications/ePOS Proxy.app"`,],
+    },
+    {
+      title: "Legacy HTTPS Trust",
+      desc: `If you must use the HTTPS address, use *App → Install HTTPS Certificate* first and mark the ePOS Proxy Local CA as trusted in Keychain Access. HTTPS listens on port *${info.httpsPort}*.`,
     },
     ...networkSteps(info),
   ];
@@ -79,7 +87,7 @@ function defaultSteps({ localIp, port }: main.TroubleshootInfo) {
   return [
     {
       title: "Check Proxy Server Accessibility",
-      desc: `Check if this proxy server is accessible from your POS device by opening *http://${localIp}:${port}* in its browser.\n\nIf a page is displayed, the server is accessible. If not, click Next.`,
+      desc: `Open *http://${localIp}:${port}/cgi-bin/epos/service.cgi?devid=local_printer* in the browser used by the POS. A blank page with no 404 means the ePOS proxy route is reachable.\n\nIf it cannot be opened, continue with the next steps.`,
     },
   ];
 }
