@@ -18,7 +18,7 @@ import (
 
 const (
 	caValidityDays     = 3650
-	serverValidityDays = 825
+	serverValidityDays = 397
 )
 
 type Paths struct {
