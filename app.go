@@ -132,6 +132,8 @@ func (a *App) startup(ctx context.Context) {
 	logger.Debugf("Application startup")
 	logger.Debugf("Config loaded from %s", a.config.Path())
 
+	a.triggerLocalNetworkPermissionProbe()
+
 	port, err := a.config.ResolvePort()
 	if err != nil {
 		logger.Errorf("Unable to resolve HTTP port: %v", err)
@@ -375,6 +377,29 @@ func (a *App) DownloadLogs() {
 	logger.Infof("Logs successfully exported to: %s", savePath)
 }
 
+func (a *App) triggerLocalNetworkPermissionProbe() {
+	if runtime.GOOS != "darwin" || a.config == nil {
+		return
+	}
+
+	ips := a.config.GetLANPrinters()
+	if len(ips) == 0 {
+		return
+	}
+
+	go func() {
+		time.Sleep(750 * time.Millisecond)
+		for _, ip := range ips {
+			logger.Infof("Probing configured LAN printer %s to request/verify macOS Local Network access", ip)
+			if err := printer.CheckLANPrinter(ip); err != nil {
+				logger.Warnf("LAN permission/connectivity probe failed for %s:%d: %v", ip, printer.LANPort, err)
+				continue
+			}
+			logger.Infof("LAN permission/connectivity probe succeeded for %s:%d", ip, printer.LANPort)
+		}
+	}()
+}
+
 func probeProxyURL(rawURL string) error {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(rawURL)
@@ -400,41 +425,51 @@ func (a *App) ShowProxyDiagnostics() {
 		httpsURL = fmt.Sprintf("https://%s:%d/healthz", util.LOCALHOST_IP, a.webserver.HTTPSPort)
 	}
 
+	httpStatus := "OK"
+	if err := probeProxyURL(httpURL); err != nil {
+		httpStatus = "FAILED: " + err.Error()
+	}
+
+	httpsStatus := "disabled"
+	if httpsURL != "" {
+		httpsStatus = "OK"
+		if err := probeProxyURL(httpsURL); err != nil {
+			httpsStatus = "FAILED: " + err.Error()
+		}
+	}
+
 	lanHost := util.GetLocalIP(true)
 	lanHTTPURL := ""
-	lanHTTPSURL := ""
-	if lanHost != util.LOCALHOST_IP {
+	lanHTTPStatus := "unavailable"
+	if lanHost != "" && lanHost != util.LOCALHOST_IP {
 		lanHTTPURL = fmt.Sprintf("http://%s:%d/healthz", lanHost, a.webserver.Port)
-		if a.webserver.HTTPSPort > 0 {
-			lanHTTPSURL = fmt.Sprintf("https://%s:%d/healthz", lanHost, a.webserver.HTTPSPort)
+		lanHTTPStatus = "OK"
+		if err := probeProxyURL(lanHTTPURL); err != nil {
+			lanHTTPStatus = "FAILED: " + err.Error()
 		}
 	}
 
-	probeStatus := func(rawURL string) string {
-		if rawURL == "" {
-			return "unavailable"
+	printerLines := ""
+	for _, ip := range a.config.GetLANPrinters() {
+		status := "OK"
+		if err := printer.CheckLANPrinter(ip); err != nil {
+			status = "FAILED: " + err.Error()
 		}
-		if err := probeProxyURL(rawURL); err != nil {
-			return "FAILED: " + err.Error()
-		}
-		return "OK"
+		printerLines += fmt.Sprintf("\nPrinter %s:%d: %s", ip, printer.LANPort, status)
 	}
-
-	httpStatus := probeStatus(httpURL)
-	httpsStatus := probeStatus(httpsURL)
-	lanHTTPStatus := probeStatus(lanHTTPURL)
-	lanHTTPSStatus := probeStatus(lanHTTPSURL)
+	if printerLines == "" {
+		printerLines = "\nNo LAN printers are configured."
+	}
 
 	message := fmt.Sprintf(
-		"Loopback HTTP: %s\n%s\n\nLoopback HTTPS: %s\n%s\n\nLAN HTTP: %s\n%s\n\nLAN HTTPS: %s\n%s\n\nChrome 145+ separates Local Network and loopback permissions. For Odoo 19 with LNA enabled, prefer the LAN HTTP address. If 127.0.0.1 is used, Chrome also needs loopback/Apps on device permission for the Odoo site.",
+		"Local HTTP: %s\n%s\n\nLocal HTTPS: %s\n%s\n\nLAN HTTP self-check: %s\n%s\n\nLAN printer connectivity:%s\n\nFor a remote Odoo/POS, the LAN HTTP URL is the relevant proxy endpoint. If the LAN self-check is OK but another computer cannot open it, check the macOS Application Firewall. If a printer check fails on macOS 15+, enable ePOS Proxy under System Settings → Privacy & Security → Local Network.",
 		httpStatus,
 		httpURL,
 		httpsStatus,
 		httpsURL,
 		lanHTTPStatus,
 		lanHTTPURL,
-		lanHTTPSStatus,
-		lanHTTPSURL,
+		printerLines,
 	)
 
 	if _, err := a.dlg().Message(a.ctx, wailsruntime.MessageDialogOptions{
