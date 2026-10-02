@@ -72,9 +72,11 @@ func (cm *Manager) Load() error {
 		return fmt.Errorf("config read error: %w", err)
 	}
 
-	if err := json.Unmarshal(data, &cm.Data); err != nil {
+	loaded := defaults()
+	if err := json.Unmarshal(data, &loaded); err != nil {
 		return fmt.Errorf("config parse error: %w", err)
 	}
+	cm.Data = loaded
 	return nil
 }
 
