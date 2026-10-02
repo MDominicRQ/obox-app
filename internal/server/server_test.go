@@ -287,6 +287,7 @@ func TestServer_HTTPAndHTTPSCORSPreflight(t *testing.T) {
 				_ = resp.Body.Close()
 
 				testutil.ExpectedEqual(t, resp.Header.Get("Access-Control-Allow-Origin"), "*")
+				testutil.ExpectedEqual(t, resp.Header.Get("Access-Control-Allow-Private-Network"), "true")
 				return
 			}
 			t.Fatalf("%s endpoint did not become ready for CORS preflight: %v", tc.name, lastErr)
