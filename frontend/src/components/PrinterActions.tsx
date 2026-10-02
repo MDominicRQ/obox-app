@@ -11,12 +11,19 @@ interface PrinterActionsProps {
 
 export default function PrinterActions({ printer }: PrinterActionsProps) {
   const toastContext = useContext(ToastContext);
-  const [copiedTarget, setCopiedTarget] = useState<"http" | "https" | null>(null);
+  const [copiedTarget, setCopiedTarget] = useState<
+    "http" | "https" | "lan-http" | "lan-https" | null
+  >(null);
   const [isTestPrinting, setIsTestPrinting] = useState(false);
   const [isCashDrawerOpening, setIsCashDrawerOpening] = useState(false);
   const httpsIp = printer.httpsIp;
+  const networkIp = printer.networkIp;
+  const networkHttpsIp = printer.networkHttpsIp;
 
-  async function onCopy(text: string, target: "http" | "https") {
+  async function onCopy(
+    text: string,
+    target: "http" | "https" | "lan-http" | "lan-https",
+  ) {
     try {
       await copyText(text);
       setCopiedTarget(target);
@@ -75,7 +82,7 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
             : "bg-odoo text-white hover:bg-odoo-dark"
         }`}
       >
-        {copiedTarget === "http" ? "✓ Copied!" : "Copy IP"}
+        {copiedTarget === "http" ? "✓ Copied!" : "Copy HTTP"}
       </button>
 
       {httpsIp && (
@@ -88,6 +95,32 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
           }`}
         >
           {copiedTarget === "https" ? "✓ Copied!" : "Copy HTTPS"}
+        </button>
+      )}
+
+      {networkIp && (
+        <button
+          onClick={() => onCopy(networkIp, "lan-http")}
+          className={`flex-1 border text-sm rounded-lg px-3 py-2 cursor-pointer whitespace-nowrap ${
+            copiedTarget === "lan-http"
+              ? "bg-success text-white"
+              : "bg-odoo text-white hover:bg-odoo-dark"
+          }`}
+        >
+          {copiedTarget === "lan-http" ? "✓ Copied!" : "Copy LAN HTTP"}
+        </button>
+      )}
+
+      {networkHttpsIp && (
+        <button
+          onClick={() => onCopy(networkHttpsIp, "lan-https")}
+          className={`flex-1 border text-sm rounded-lg px-3 py-2 cursor-pointer whitespace-nowrap ${
+            copiedTarget === "lan-https"
+              ? "bg-success text-white"
+              : "bg-odoo text-white hover:bg-odoo-dark"
+          }`}
+        >
+          {copiedTarget === "lan-https" ? "✓ Copied!" : "Copy LAN HTTPS"}
         </button>
       )}
 
