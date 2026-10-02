@@ -27,24 +27,33 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+func startupWindowOptions(args []string) (options.WindowStartState, bool) {
+	windowStartState := options.Normal
+	startHidden := false
+
+	for _, arg := range args {
+		switch arg {
+		case "--background":
+			startHidden = true
+		case "--minimized":
+			// Keep the old flag working for existing shortcuts.
+			windowStartState = options.Minimised
+		}
+	}
+	return windowStartState, startHidden
+}
+
 func main() {
 	logger.InitLogger()
 	logger.Debugf("Starting ePOS Proxy")
 
 	app := NewApp()
 
-	windowStartState := options.Normal
-	startHidden := false
-	for _, arg := range os.Args[1:] {
-		switch arg {
-		case "--background":
-			logger.Debugf("Application started in background mode")
-			startHidden = true
-		case "--minimized":
-			// Keep the old flag working for existing shortcuts.
-			logger.Debugf("Application started with --minimized flag")
-			windowStartState = options.Minimised
-		}
+	windowStartState, startHidden := startupWindowOptions(os.Args[1:])
+	if startHidden {
+		logger.Debugf("Application started in background mode")
+	} else if windowStartState == options.Minimised {
+		logger.Debugf("Application started with --minimized flag")
 	}
 
 	err := wails.Run(&options.App{
