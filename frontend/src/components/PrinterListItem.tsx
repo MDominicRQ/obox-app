@@ -100,21 +100,21 @@ export default function PrinterListItem({
             )}
 
             <div className="mt-2 text-xs text-gray-500">
-              If Odoo runs in a browser on this Mac, prefer Local HTTP with LNA
-              enabled. Use Local HTTPS only with LNA disabled and after trusting
-              the ePOS Proxy CA certificate.
+              For Odoo 19 on Chrome 145+, prefer LAN HTTP with LNA enabled.
+              Chrome now separates Local Network access from loopback access:
+              127.0.0.1 requires the separate “Apps on device” permission.
             </div>
 
             <div className="mt-1 text-xs text-gray-500">
-              LAN addresses are only needed when the POS browser is running on
-              another device. On modern macOS, also allow Local Network access
-              for that browser in System Settings when using a LAN address.
+              Local 127.0.0.1 remains available as a fallback. If you use it in
+              Chrome 145+, allow both the Odoo site's Local Network permission
+              and its Apps on device / loopback permission.
             </div>
 
             {!printerContext.data.networkPrintingEnabled && (
               <div className="mt-2 text-xs text-amber-700">
-                App → Allow Network Printing is only required for access from
-                another device on the LAN.
+                Enable App → Allow Network Printing to expose the recommended
+                LAN HTTP address for current Chromium.
               </div>
             )}
           </div>
