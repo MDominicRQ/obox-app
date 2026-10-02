@@ -107,7 +107,7 @@ func NewApp() *App {
 	a.autoStart = &autostart.App{
 		Name:        "epos-proxy",
 		DisplayName: "ePOS Proxy",
-		Exec:        []string{os.Args[0]},
+		Exec:        []string{os.Args[0], "--background"},
 	}
 	a.printerManager = printer.NewManager()
 	a.dialogs = runtimeDialogs{}
