@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,6 +40,20 @@ func (f *fakeDialogs) Message(_ context.Context, opts wailsruntime.MessageDialog
 func (f *fakeDialogs) SaveFile(_ context.Context, opts wailsruntime.SaveDialogOptions) (string, error) {
 	f.saves = append(f.saves, opts)
 	return f.savePath, f.saveErr
+}
+
+func TestProbeProxyURL(t *testing.T) {
+	okServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer okServer.Close()
+	testutil.ExpectedNoError(t, probeProxyURL(okServer.URL))
+
+	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	}))
+	defer badServer.Close()
+	testutil.ExpectedError(t, probeProxyURL(badServer.URL))
 }
 
 func TestNewApp(t *testing.T) {
