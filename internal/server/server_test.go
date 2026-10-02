@@ -223,6 +223,77 @@ func TestPrintData_AutoSelectRoute(t *testing.T) {
 }
 
 
+func TestServer_HTTPAndHTTPSCORSPreflight(t *testing.T) {
+	httpPort := testutil.GetFreePort(t)
+	httpsPort := testutil.GetFreePort(t)
+	for httpsPort == httpPort {
+		httpsPort = testutil.GetFreePort(t)
+	}
+
+	paths, err := certs.Ensure(t.TempDir(), "127.0.0.1")
+	testutil.ExpectedNoError(t, err)
+
+	mgr := printer.NewManager()
+	s := NewWithTLS(httpPort, httpsPort, paths.ServerCert, paths.ServerKey, mgr)
+	defer s.Stop()
+
+	caPEM, err := os.ReadFile(paths.CACert)
+	testutil.ExpectedNoError(t, err)
+	pool := x509.NewCertPool()
+	testutil.ExpectedTrue(t, pool.AppendCertsFromPEM(caPEM), "Expected CA certificate to be added to pool")
+
+	httpsClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				RootCAs:    pool,
+			},
+		},
+		Timeout: 2 * time.Second,
+	}
+
+	for _, tc := range []struct {
+		name   string
+		url    string
+		client *http.Client
+	}{
+		{
+			name:   "http",
+			url:    fmt.Sprintf("http://127.0.0.1:%d/cgi-bin/epos/service.cgi", httpPort),
+			client: &http.Client{Timeout: 2 * time.Second},
+		},
+		{
+			name:   "https",
+			url:    fmt.Sprintf("https://127.0.0.1:%d/cgi-bin/epos/service.cgi", httpsPort),
+			client: httpsClient,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var lastErr error
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				req, err := http.NewRequest(http.MethodOptions, tc.url, nil)
+				testutil.ExpectedNoError(t, err)
+				req.Header.Set("Origin", "https://odoo.example")
+				req.Header.Set("Access-Control-Request-Method", "POST")
+				req.Header.Set("Access-Control-Request-Private-Network", "true")
+
+				resp, err := tc.client.Do(req)
+				if err != nil {
+					lastErr = err
+					time.Sleep(25 * time.Millisecond)
+					continue
+				}
+				_ = resp.Body.Close()
+
+				testutil.ExpectedEqual(t, resp.Header.Get("Access-Control-Allow-Origin"), "*")
+				return
+			}
+			t.Fatalf("%s endpoint did not become ready for CORS preflight: %v", tc.name, lastErr)
+		})
+	}
+}
+
 func TestServer_HTTPAndHTTPSEndpoints(t *testing.T) {
 	httpPort := testutil.GetFreePort(t)
 	httpsPort := testutil.GetFreePort(t)
