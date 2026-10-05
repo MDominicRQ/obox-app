@@ -38,19 +38,16 @@ jobs:
             artifact: epos-proxy-macos-arm64-macos11plus
             go_version: "1.24.13"
             go_mod_version: "1.24.0"
-            fiber_version: "v3.0.0-beta.4"
             deployment_target: "11.0"
 
           # Intel legacy: Catalina 10.15+.
           # Go 1.22.12 is the last Go release supported on Catalina.
-          # Fiber beta.3 preserves the v3/PNA API while remaining compatible with Go 1.22.
           - arch: amd64
             runner: macos-15-intel
             platform: darwin/amd64
             artifact: epos-proxy-macos-intel-catalina10.15plus
             go_version: "1.22.12"
             go_mod_version: "1.22.0"
-            fiber_version: "v3.0.0-beta.3"
             deployment_target: "10.15"
 
     runs-on: ${{ matrix.runner }}
@@ -100,14 +97,10 @@ jobs:
       # ============================================================
       # TARGET-SPECIFIC GO MODULE COMPATIBILITY
       #
-      # ARM64 / macOS 11+ keeps the already validated dependency set.
-      #
-      # Intel / Catalina uses the last Go toolchain supported by
-      # macOS 10.15 and Fiber beta.3, which exposes the same CORS/PNA
-      # API used by this project while remaining compatible with Go 1.22.
-      #
-      # Application source code is shared; only build-time dependency
-      # resolution differs between the two macOS artifacts.
+      # ARM64 / macOS 11+ keeps Go 1.24.13.
+      # Intel / Catalina uses Go 1.22.12, the last Go release supported
+      # by macOS 10.15. The proxy server itself uses the standard library,
+      # so no web-framework downgrade is required for the legacy target.
       # ============================================================
 
       - name: Configure Go dependencies for target
@@ -122,7 +115,6 @@ jobs:
 
           require (
               github.com/emersion/go-autostart v0.0.0-20250403115856-34830d6457d2
-              github.com/gofiber/fiber/v3 ${{ matrix.fiber_version }}
               github.com/google/gousb v1.1.3
               github.com/sirupsen/logrus v1.9.4
               github.com/wailsapp/wails/v2 v2.12.0
