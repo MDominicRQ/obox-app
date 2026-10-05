@@ -110,7 +110,6 @@ func NewApp() *App {
 		DisplayName: "ePOS Proxy",
 		Exec:        []string{os.Args[0], "--background"},
 	}
-	a.printerManager = printer.NewManager()
 	a.dialogs = runtimeDialogs{}
 
 	cfg, err := config.NewManager()
@@ -123,8 +122,23 @@ func NewApp() *App {
 	}
 
 	a.config = cfg
+	a.printerManager = printer.NewManager(cfg.HasLANPrinter)
 
 	return a
+}
+
+func (a *App) proxyAccessPolicy() server.AccessPolicy {
+	return server.AccessPolicy{
+		NetworkPrintingEnabled: a.config.IsNetworkPrintingEnabled,
+	}
+}
+
+func (a *App) startHTTPOnly(port int) {
+	a.webserver = server.New(port, a.printerManager, a.proxyAccessPolicy())
+	if err := a.webserver.StartError(); err != nil {
+		logger.Errorf("Proxy startup failed: %v", err)
+		a.showError("Proxy Startup Failed", err.Error())
+	}
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -137,14 +151,14 @@ func (a *App) startup(ctx context.Context) {
 	port, err := a.config.ResolvePort()
 	if err != nil {
 		logger.Errorf("Unable to resolve HTTP port: %v", err)
-		a.webserver = server.New(port, a.printerManager)
+		a.showError("Proxy Startup Failed", err.Error())
 		return
 	}
 
 	httpsPort, err := a.config.ResolveHTTPSPort(port)
 	if err != nil {
-		logger.Warnf("HTTPS disabled because no HTTPS port could be resolved: %v", err)
-		a.webserver = server.New(port, a.printerManager)
+		logger.Warnf("HTTPS disabled because the configured HTTPS port is unavailable: %v", err)
+		a.startHTTPOnly(port)
 		return
 	}
 
@@ -154,7 +168,7 @@ func (a *App) startup(ctx context.Context) {
 	certPaths, err := certs.Ensure(filepath.Dir(a.config.Path()), lanIPs...)
 	if err != nil {
 		logger.Warnf("HTTPS disabled because local certificates could not be prepared: %v", err)
-		a.webserver = server.New(port, a.printerManager)
+		a.startHTTPOnly(port)
 		return
 	}
 
@@ -165,7 +179,14 @@ func (a *App) startup(ctx context.Context) {
 		certPaths.ServerCert,
 		certPaths.ServerKey,
 		a.printerManager,
+		a.proxyAccessPolicy(),
 	)
+	if err := a.webserver.StartError(); err != nil {
+		logger.Warnf("Proxy started with a listener warning: %v", err)
+		if !a.webserver.Running() {
+			a.showError("Proxy Startup Failed", err.Error())
+		}
+	}
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -182,7 +203,7 @@ func (a *App) shutdown(ctx context.Context) {
 func (a *App) AppVariable() AppVariable {
 	return AppVariable{
 		Os:            runtime.GOOS,
-		ServerRunning: a.webserver.Running(),
+		ServerRunning: a.webserver != nil && a.webserver.Running(),
 	}
 }
 
