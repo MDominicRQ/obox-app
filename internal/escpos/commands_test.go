@@ -297,3 +297,20 @@ func TestBuildImage_DataHandling(t *testing.T) {
 	// Verify Chunk 2 header (0x2D = 45)
 	testutil.ExpectedBytesEqual(t, got[263:263+8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0x2D, 0x00})
 }
+
+func TestBuildImage_RejectsUnsafeDimensions(t *testing.T) {
+	tests := []ImageAttrs{
+		{Width: -1, Height: 1},
+		{Width: 1, Height: -1},
+		{Width: 0, Height: 1},
+		{Width: 1, Height: 0},
+		{Width: maxImageBytes*8 + 1, Height: 1},
+		{Width: 8, Height: maxImageBytes + 1},
+	}
+
+	for _, attrs := range tests {
+		if _, err := BuildImage("AA==", attrs); err == nil {
+			t.Fatalf("expected unsafe image dimensions to be rejected: %+v", attrs)
+		}
+	}
+}
