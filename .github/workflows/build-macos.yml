@@ -15,7 +15,7 @@ env:
   # si alguna dependencia lo solicita.
   GOTOOLCHAIN: "local"
 
-  NODE_VERSION: "22"
+  NODE_VERSION: "22.20.0"
 
   WAILS_VERSION: "v2.12.0"
 
