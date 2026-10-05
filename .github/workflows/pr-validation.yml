@@ -9,7 +9,7 @@ env:
   NODE_OPTIONS: "--max-old-space-size=4096"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -31,7 +31,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
           submodules: recursive
 
       - name: Build wails
@@ -43,23 +42,6 @@ jobs:
           go-version: '1.26.6'
           node-version: '22.20.0'
           wails-version: 'v2.12.0'
-
-      - name: Persist updated frontend lockfile
-        if: runner.os == 'Linux' && github.event.pull_request.head.repo.full_name == github.repository
-        shell: bash
-        env:
-          HEAD_BRANCH: ${{ github.head_ref }}
-        run: |
-          set -euxo pipefail
-          if git diff --quiet -- frontend/package-lock.json; then
-            echo "Frontend lockfile already matches."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add frontend/package-lock.json
-          git commit -m "Refresh frontend dependency lock"
-          git push origin "HEAD:${HEAD_BRANCH}"
 
       - name: Verify dependency locks are clean
         if: runner.os == 'Linux'
