@@ -184,3 +184,26 @@ func TestHelper_Clamp(t *testing.T) {
 	testutil.ExpectedEqual(t, clamp(0, 1, 10), 1)
 	testutil.ExpectedEqual(t, clamp(15, 1, 10), 10)
 }
+
+func TestParseXML_RejectsNestedCommandContent(t *testing.T) {
+	_, err := ParseXML([]byte(`<epos-print><text>safe<text>nested</text></text></epos-print>`))
+	testutil.ExpectedError(t, err)
+	if !strings.Contains(err.Error(), "nested element") {
+		t.Fatalf("expected nested-element error, got: %v", err)
+	}
+}
+
+func TestParseXML_RejectsExcessiveElementCount(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("<epos-print>")
+	for i := 0; i < maxEPOSItems+1; i++ {
+		body.WriteString("<feed line=\"1\"/>")
+	}
+	body.WriteString("</epos-print>")
+
+	_, err := ParseXML([]byte(body.String()))
+	testutil.ExpectedError(t, err)
+	if !strings.Contains(err.Error(), "too many elements") {
+		t.Fatalf("expected item-limit error, got: %v", err)
+	}
+}
