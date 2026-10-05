@@ -3,6 +3,7 @@ package escpos
 import (
 	"bytes"
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"epos-proxy/internal/testutil"
