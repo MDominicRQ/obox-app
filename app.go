@@ -456,6 +456,7 @@ func (a *App) ShowProxyDiagnostics() {
 		}
 	}
 
+	lanIPs := util.GetLocalIPv4Addresses()
 	lanHost := util.GetLocalIP(true)
 	lanHTTPURL := ""
 	lanHTTPStatus := "unavailable"
@@ -480,11 +481,13 @@ func (a *App) ShowProxyDiagnostics() {
 	}
 
 	message := fmt.Sprintf(
-		"Local HTTP: %s\n%s\n\nLocal HTTPS: %s\n%s\n\nLAN HTTP self-check: %s\n%s\n\nLAN printer connectivity:%s\n\nmacOS Application Firewall: %s\n\nFor a remote Odoo/POS, the LAN HTTP URL is the relevant proxy endpoint. If the LAN self-check is OK but another computer cannot open it, check System Settings → Network → Firewall → Options and allow ePOS Proxy. If a printer check fails on macOS 15+, enable ePOS Proxy under System Settings → Privacy & Security → Local Network.",
+		"Local HTTP: %s\n%s\n\nLocal HTTPS: %s\n%s\n\nDetected LAN IPv4 addresses: %v\nSelected LAN address: %s\n\nLAN HTTP self-check: %s\n%s\n\nLAN printer connectivity:%s\n\nmacOS Application Firewall: %s\n\nFor a remote Odoo/POS, test the selected LAN HTTP URL from the device that actually runs Odoo. If Odoo still reports unreachable, reproduce the failure and export the logs immediately afterwards. The logs now record incoming requests and CORS/LNA-related response headers at Info level.",
 		httpStatus,
 		httpURL,
 		httpsStatus,
 		httpsURL,
+		lanIPs,
+		lanHost,
 		lanHTTPStatus,
 		lanHTTPURL,
 		printerLines,
