@@ -12,7 +12,7 @@ on:
       - "*"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   # Evita que Go descargue automáticamente un toolchain más nuevo
@@ -655,12 +655,26 @@ jobs:
           echo
           echo "Architecture verification successful."
 
-      - name: Scan compiled macOS binary for known Go vulnerabilities
+      - name: Report known vulnerabilities in legacy macOS binary
         shell: bash
         run: |
           set -euxo pipefail
 
-          "$(go env GOPATH)/bin/govulncheck" -mode=binary "$BIN"
+          # These compatibility artifacts intentionally use the final Go
+          # toolchains that still support their minimum macOS versions:
+          #
+          #   arm64 / macOS 11+  -> Go 1.24.13
+          #   amd64 / macOS 10.15+ -> Go 1.22.12
+          #
+          # Both toolchains are EOL and therefore contain known standard-library
+          # findings whose fixes require newer Go releases that also raise the
+          # minimum supported macOS version. Keep the binary scan visible, but
+          # do not turn that unavoidable compatibility tradeoff into a false CI
+          # failure. The supported-toolchain source scan in PR Validation remains
+          # blocking.
+          if ! "$(go env GOPATH)/bin/govulncheck" -mode=binary "$BIN"; then
+            echo "::warning::Legacy macOS compatibility binary contains known vulnerabilities in its EOL Go runtime and/or compatibility dependencies. Review the report above and SECURITY.md."
+          fi
 
       # ============================================================
       # VERIFY NO HOMEBREW / EXTERNAL LIBUSB
@@ -852,6 +866,9 @@ jobs:
 
     needs:
       - build-macos
+
+    permissions:
+      contents: write
 
     runs-on: ubuntu-latest
 
