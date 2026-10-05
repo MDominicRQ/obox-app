@@ -151,6 +151,14 @@ runs:
                       mingw-w64-x86_64-pkg-config
                       mingw-w64-x86_64-nsis
 
+                - name: Prepare frontend embed directory
+                  if: inputs.build == 'true'
+                  working-directory: ${{ inputs.app-working-directory }}
+                  shell: bash
+                  run: |
+                    mkdir -p frontend/dist
+                    touch frontend/dist/.gitkeep
+
                 # Building step
                 - name: Build App
                   if: inputs.build == 'true' && runner.os == 'macOS'
