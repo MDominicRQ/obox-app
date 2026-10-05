@@ -11,6 +11,7 @@ const (
 	LF  byte = 0x0A
 
 	maxImgSliceHeight = 255
+	maxImageBytes     = 4 * 1024 * 1024
 )
 
 var (
@@ -110,6 +111,19 @@ type ImageAttrs struct {
 // GS v 0 command stream needed to print it. The image is sliced into chunks
 // of at most 255 rows to satisfy the command's yL byte limit.
 func BuildImage(b64data string, a ImageAttrs) ([]byte, error) {
+	if a.Width <= 0 || a.Height <= 0 {
+		return nil, fmt.Errorf("image dimensions must be positive")
+	}
+
+	bytesPerRow := (a.Width + 7) / 8
+	if bytesPerRow <= 0 || a.Height > maxImageBytes/bytesPerRow {
+		return nil, fmt.Errorf("image dimensions exceed safe limits")
+	}
+	expectedLen := bytesPerRow * a.Height
+	if expectedLen > maxImageBytes {
+		return nil, fmt.Errorf("image data exceeds %d bytes", maxImageBytes)
+	}
+
 	raw, err := base64.StdEncoding.DecodeString(b64data)
 	if err != nil {
 		raw, err = base64.RawStdEncoding.DecodeString(b64data)
@@ -117,9 +131,6 @@ func BuildImage(b64data string, a ImageAttrs) ([]byte, error) {
 			return nil, fmt.Errorf("base64 decode: %w", err)
 		}
 	}
-
-	bytesPerRow := (a.Width + 7) / 8
-	expectedLen := bytesPerRow * a.Height
 
 	switch {
 	case len(raw) < expectedLen:
