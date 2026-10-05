@@ -560,7 +560,39 @@ jobs:
             exit 1
           fi
 
-          if ! printf '%s' "$BUNDLE_ID" | grep -Eq '^[A-Za-z0-9.-]+
+          if printf '%s' "$BUNDLE_ID" | grep -Eq '[^A-Za-z0-9.-]'; then
+            echo "ERROR: CFBundleIdentifier contains invalid characters"
+            exit 1
+          fi
+
+          LOCAL_NETWORK_USAGE="$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :NSLocalNetworkUsageDescription" \
+              "$PLIST"
+          )"
+
+          if [ -z "$LOCAL_NETWORK_USAGE" ]; then
+            echo "ERROR: NSLocalNetworkUsageDescription is missing or empty"
+            exit 1
+          fi
+
+          ALLOWS_LOCAL_NETWORKING="$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :NSAppTransportSecurity:NSAllowsLocalNetworking" \
+              "$PLIST"
+          )"
+
+          if [ "$ALLOWS_LOCAL_NETWORKING" != "true" ]; then
+            echo "ERROR: NSAllowsLocalNetworking must be true"
+            exit 1
+          fi
+
+          echo "macOS bundle identity and Local Network metadata verified."
+
+      # ============================================================
+      # LOCATE EXECUTABLE
+      # ============================================================
+
       - name: Locate executable
         shell: bash
         run: |
