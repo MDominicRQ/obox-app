@@ -159,6 +159,10 @@ func (a *App) startup(ctx context.Context) {
 	if err != nil {
 		logger.Warnf("HTTPS disabled because the configured HTTPS port is unavailable: %v", err)
 		a.startHTTPOnly(port)
+		a.showError(
+			"HTTPS Proxy Unavailable",
+			fmt.Sprintf("%v\n\nThe HTTP proxy remains available, but the HTTPS endpoint configured in Odoo will not work until this port conflict is resolved.", err),
+		)
 		return
 	}
 
@@ -169,6 +173,10 @@ func (a *App) startup(ctx context.Context) {
 	if err != nil {
 		logger.Warnf("HTTPS disabled because local certificates could not be prepared: %v", err)
 		a.startHTTPOnly(port)
+		a.showError(
+			"HTTPS Proxy Unavailable",
+			fmt.Sprintf("%v\n\nThe HTTP proxy remains available, but HTTPS is disabled until the certificate problem is resolved.", err),
+		)
 		return
 	}
 
@@ -185,6 +193,11 @@ func (a *App) startup(ctx context.Context) {
 		logger.Warnf("Proxy started with a listener warning: %v", err)
 		if !a.webserver.Running() {
 			a.showError("Proxy Startup Failed", err.Error())
+		} else {
+			a.showError(
+				"HTTPS Proxy Unavailable",
+				fmt.Sprintf("%v\n\nThe HTTP proxy is still running, but the HTTPS endpoint is unavailable.", err),
+			)
 		}
 	}
 }
@@ -481,7 +494,9 @@ func (a *App) ShowProxyDiagnostics() {
 	lanHost := util.GetLocalIP(true)
 	lanHTTPURL := ""
 	lanHTTPStatus := "unavailable"
-	if lanHost != "" && lanHost != util.LOCALHOST_IP {
+	if !a.config.IsNetworkPrintingEnabled() {
+		lanHTTPStatus = "disabled by Allow Network Printing"
+	} else if lanHost != "" && lanHost != util.LOCALHOST_IP {
 		lanHTTPURL = fmt.Sprintf("http://%s:%d/healthz", lanHost, a.webserver.Port)
 		lanHTTPStatus = "OK"
 		if err := probeProxyURL(lanHTTPURL); err != nil {
