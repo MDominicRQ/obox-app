@@ -1,17 +1,31 @@
 package server
 
 import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
 	"sync/atomic"
+	"time"
 
 	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/logger"
 	"epos-proxy/internal/printer"
+)
 
-	"github.com/gofiber/fiber/v3"
-	"github.com/gofiber/fiber/v3/middleware/cors"
+const (
+	maxRequestBodyBytes = int64(4 * 1024 * 1024)
+	serverReadTimeout    = 15 * time.Second
+	serverWriteTimeout   = 30 * time.Second
+	serverIdleTimeout    = 60 * time.Second
+	serverHeaderTimeout  = 5 * time.Second
+	serverShutdownTimeout = 5 * time.Second
 )
 
 type EPOSResponse struct {
@@ -21,165 +35,307 @@ type EPOSResponse struct {
 	Status  string   `xml:"status,attr"`
 }
 
+// AccessPolicy controls whether non-loopback clients may use the proxy.
+// A zero-value policy is permissive so package-level tests and embedders keep
+// their historical behavior. Production passes the live application setting.
+type AccessPolicy struct {
+	NetworkPrintingEnabled func() bool
+}
+
+func (p AccessPolicy) remoteAllowed() bool {
+	return p.NetworkPrintingEnabled == nil || p.NetworkPrintingEnabled()
+}
+
 type Server struct {
-	app          *fiber.App
-	httpsApp     *fiber.App
+	app          http.Handler
+	httpServer   *http.Server
+	httpsServer  *http.Server
 	Port         int
 	HTTPSPort    int
 	httpRunning  atomic.Bool
 	httpsRunning atomic.Bool
+	startErr     error
 }
 
-func newFiberApp(mgr *printer.Manager) *fiber.App {
-	app := fiber.New(fiber.Config{
-		AppName: "ePOS proxy",
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	wrote  bool
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if w.wrote {
+		return
+	}
+	w.status = code
+	w.wrote = true
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(p []byte) (int, error) {
+	if !w.wrote {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func requestIP(r *http.Request) net.IP {
+	host := r.RemoteAddr
+	if parsedHost, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	return net.ParseIP(host)
+}
+
+func withRecovery(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				logger.Errorf("Recovered proxy panic method=%s path=%s remote=%s panic=%v", r.Method, r.URL.Path, r.RemoteAddr, recovered)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
 	})
-	app.Use(func(ctx fiber.Ctx) error {
-		method := ctx.Method()
-		path := ctx.Path()
-		remote := ctx.IP()
-		origin := ctx.Get("Origin")
-		requestMethod := ctx.Get("Access-Control-Request-Method")
-		requestHeaders := ctx.Get("Access-Control-Request-Headers")
-		requestPrivateNetwork := ctx.Get("Access-Control-Request-Private-Network")
+}
 
-		err := ctx.Next()
-
-		response := ctx.Response()
-		status := 0
-		allowOrigin := ""
-		allowMethods := ""
-		allowHeaders := ""
-		allowPrivateNetwork := ""
-		if response != nil {
-			status = response.StatusCode()
-			allowOrigin = string(response.Header.Peek("Access-Control-Allow-Origin"))
-			allowMethods = string(response.Header.Peek("Access-Control-Allow-Methods"))
-			allowHeaders = string(response.Header.Peek("Access-Control-Allow-Headers"))
-			allowPrivateNetwork = string(response.Header.Peek("Access-Control-Allow-Private-Network"))
-		}
+func withRequestLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
 
 		logger.Infof(
-			"Proxy request method=%s path=%s remote=%s origin=%q acrm=%q acrh=%q acrpn=%q status=%d acao=%q acam=%q acah=%q acapn=%q err=%v",
-			method,
-			path,
-			remote,
-			origin,
-			requestMethod,
-			requestHeaders,
-			requestPrivateNetwork,
-			status,
-			allowOrigin,
-			allowMethods,
-			allowHeaders,
-			allowPrivateNetwork,
-			err,
+			"Proxy request method=%s path=%s remote=%s origin=%q acrm=%q acrh=%q acrpn=%q status=%d acao=%q acam=%q acah=%q acapn=%q",
+			r.Method,
+			r.URL.Path,
+			r.RemoteAddr,
+			r.Header.Get("Origin"),
+			r.Header.Get("Access-Control-Request-Method"),
+			r.Header.Get("Access-Control-Request-Headers"),
+			r.Header.Get("Access-Control-Request-Private-Network"),
+			sw.status,
+			sw.Header().Get("Access-Control-Allow-Origin"),
+			sw.Header().Get("Access-Control-Allow-Methods"),
+			sw.Header().Get("Access-Control-Allow-Headers"),
+			sw.Header().Get("Access-Control-Allow-Private-Network"),
 		)
-		return err
 	})
+}
 
-	app.Use(cors.New(cors.Config{
-		AllowOriginsFunc: func(origin string) bool {
-			return origin != ""
-		},
-		AllowPrivateNetwork: true,
-	}))
+func withAccessPolicy(next http.Handler, policy AccessPolicy) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := requestIP(r)
+		if ip != nil && ip.IsLoopback() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !policy.remoteAllowed() {
+			http.Error(w, "Network printing is disabled", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
-	app.Get("/", func(ctx fiber.Ctx) error {
-		return ctx.JSON(fiber.Map{
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Add("Vary", "Origin")
+		}
+
+		if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			requestHeaders := r.Header.Get("Access-Control-Request-Headers")
+			if requestHeaders == "" {
+				requestHeaders = "Content-Type"
+			}
+			w.Header().Set("Access-Control-Allow-Headers", requestHeaders)
+			w.Header().Set("Access-Control-Max-Age", "600")
+			if strings.EqualFold(r.Header.Get("Access-Control-Request-Private-Network"), "true") {
+				w.Header().Set("Access-Control-Allow-Private-Network", "true")
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		logger.Errorf("JSON response error: %v", err)
+	}
+}
+
+func writeEPOSResponse(w http.ResponseWriter, response EPOSResponse) {
+	data, err := xml.Marshal(response)
+	if err != nil {
+		logger.Errorf("XML response marshal error: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	defer r.Body.Close()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return nil, err
+		}
+		http.Error(w, "Unable to read request body", http.StatusBadRequest)
+		return nil, err
+	}
+	return body, nil
+}
+
+func newHTTPHandler(mgr *printer.Manager, policy AccessPolicy) http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
 			"status":  "ok",
-			"service": app.Config().AppName,
+			"service": "ePOS proxy",
 			"message": "ePOS Proxy is reachable",
 		})
 	})
 
-	app.Get("/healthz", func(ctx fiber.Ctx) error {
-		return ctx.JSON(fiber.Map{
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
 			"status":  "ok",
-			"service": app.Config().AppName,
+			"service": "ePOS proxy",
 		})
 	})
 
-	printerHealth := func(ctx fiber.Ctx) error {
-		return ctx.JSON(fiber.Map{
+	printerHealth := func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
 			"status":    "ok",
-			"service":   app.Config().AppName,
-			"printerId": ctx.Params("printerId"),
+			"service":   "ePOS proxy",
+			"printerId": r.PathValue("printerId"),
 			"message":   "ePOS Proxy printer endpoint is reachable. Use this same address in Odoo without adding http:// or https://.",
 		})
 	}
-	app.Get("/p/:printerId", printerHealth)
-	app.Get("/p/:printerId/", printerHealth)
+	mux.HandleFunc("GET /p/{printerId}", printerHealth)
+	mux.HandleFunc("GET /p/{printerId}/{$}", printerHealth)
 
-	app.Get("/p/:printerId/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
-		return ctx.Status(fiber.StatusOK).Send([]byte{})
+	mux.HandleFunc("GET /p/{printerId}/cgi-bin/epos/service.cgi", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /cgi-bin/epos/service.cgi", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
 	})
 
-	app.Get("/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
-		return ctx.Status(fiber.StatusOK).Send([]byte{})
+	mux.HandleFunc("POST /p/{printerId}/cgi-bin/epos/service.cgi", func(w http.ResponseWriter, r *http.Request) {
+		printerID := r.PathValue("printerId")
+		logger.Infof("Print request received for printer: %s", printerID)
+		printData(mgr, w, r, printerID)
 	})
-
-	app.Post("/p/:printerId/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
-		printerId := ctx.Params("printerId")
-		logger.Infof("Print request received for printer: %s", printerId)
-		return printData(mgr, ctx, printerId)
-	})
-
-	app.Post("/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
+	mux.HandleFunc("POST /cgi-bin/epos/service.cgi", func(w http.ResponseWriter, r *http.Request) {
 		logger.Infof("Print request received (auto printer selection)")
-		return printData(mgr, ctx, "")
+		printData(mgr, w, r, "")
+	})
+	mux.HandleFunc("POST /p/{printerId}/pstprnt", func(w http.ResponseWriter, r *http.Request) {
+		printerID := r.PathValue("printerId")
+		logger.Infof("Label print request received for printer: %s", printerID)
+		printLabel(mgr, w, r, printerID)
 	})
 
-	app.Post("/p/:printerId/pstprnt", func(ctx fiber.Ctx) error {
-		printerId := ctx.Params("printerId")
-		logger.Debugf("Label print request received for printer: %s", printerId)
-		return printLabel(mgr, ctx, printerId)
-	})
-
-	return app
+	return withRecovery(withRequestLogging(withAccessPolicy(withCORS(mux), policy)))
 }
 
-func New(port int, mgr *printer.Manager) *Server {
-	return newServer(port, 0, "", "", mgr)
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: serverHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		WriteTimeout:      serverWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
+		MaxHeaderBytes:    16 * 1024,
+	}
 }
 
-func NewWithTLS(port, httpsPort int, certFile, keyFile string, mgr *printer.Manager) *Server {
-	return newServer(port, httpsPort, certFile, keyFile, mgr)
+func New(port int, mgr *printer.Manager, policies ...AccessPolicy) *Server {
+	return newServer(port, 0, "", "", mgr, policies...)
 }
 
-func newServer(port, httpsPort int, certFile, keyFile string, mgr *printer.Manager) *Server {
+func NewWithTLS(port, httpsPort int, certFile, keyFile string, mgr *printer.Manager, policies ...AccessPolicy) *Server {
+	return newServer(port, httpsPort, certFile, keyFile, mgr, policies...)
+}
+
+func newServer(port, httpsPort int, certFile, keyFile string, mgr *printer.Manager, policies ...AccessPolicy) *Server {
+	policy := AccessPolicy{}
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+
+	handler := newHTTPHandler(mgr, policy)
 	server := &Server{
-		app:       newFiberApp(mgr),
+		app:       handler,
 		Port:      port,
 		HTTPSPort: httpsPort,
 	}
 
+	if port <= 0 {
+		server.startErr = fmt.Errorf("invalid HTTP port %d", port)
+		return server
+	}
+
+	httpListener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil {
+		server.startErr = fmt.Errorf("listen HTTP on port %d: %w", port, err)
+		return server
+	}
+
+	server.httpServer = newHTTPServer(handler)
 	server.httpRunning.Store(true)
 	go func() {
 		logger.Infof("HTTP server listening on 0.0.0.0:%d", port)
-		err := server.app.Listen(fmt.Sprintf("0.0.0.0:%d", port))
+		err := server.httpServer.Serve(httpListener)
 		server.httpRunning.Store(false)
-		if err != nil {
-			logger.Error("EPOS HTTP Server Error: ", err)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Errorf("EPOS HTTP Server Error: %v", err)
 		}
 		logger.Warn("HTTP server stopped")
 	}()
 
 	if httpsPort > 0 && certFile != "" && keyFile != "" {
-		server.httpsApp = newFiberApp(mgr)
+		certificate, certErr := tls.LoadX509KeyPair(certFile, keyFile)
+		if certErr != nil {
+			server.startErr = fmt.Errorf("load HTTPS certificate: %w", certErr)
+			return server
+		}
+
+		httpsListener, listenErr := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", httpsPort))
+		if listenErr != nil {
+			server.startErr = fmt.Errorf("listen HTTPS on port %d: %w", httpsPort, listenErr)
+			return server
+		}
+
+		server.httpsServer = newHTTPServer(handler)
+		server.httpsServer.TLSConfig = &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{certificate},
+		}
 		server.httpsRunning.Store(true)
 		go func() {
 			logger.Infof("HTTPS server listening on 0.0.0.0:%d", httpsPort)
-			err := server.httpsApp.Listen(
-				fmt.Sprintf("0.0.0.0:%d", httpsPort),
-				fiber.ListenConfig{
-					CertFile:    certFile,
-					CertKeyFile: keyFile,
-				},
-			)
+			tlsListener := tls.NewListener(httpsListener, server.httpsServer.TLSConfig)
+			err := server.httpsServer.Serve(tlsListener)
 			server.httpsRunning.Store(false)
-			if err != nil {
-				logger.Error("EPOS HTTPS Server Error: ", err)
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Errorf("EPOS HTTPS Server Error: %v", err)
 			}
 			logger.Warn("HTTPS server stopped")
 		}()
@@ -188,94 +344,106 @@ func newServer(port, httpsPort int, certFile, keyFile string, mgr *printer.Manag
 	return server
 }
 
-func printData(mgr *printer.Manager, ctx fiber.Ctx, printerID string) error {
+func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string) {
+	body, err := readBody(w, r)
+	if err != nil {
+		return
+	}
+
 	logger.Debugf("Processing print job for printer: %s", printerID)
-	jobData, err := escpos.ParseXML(ctx.Body())
+	jobData, err := escpos.ParseXML(body)
 	if err != nil {
 		logger.Errorf("XML parsing error: %v", err)
-		return ctx.XML(EPOSResponse{Success: false, Code: "SchemaError", Status: ""})
+		writeEPOSResponse(w, EPOSResponse{Success: false, Code: "SchemaError", Status: ""})
+		return
 	}
-	logger.Debug("XML parsed successfully")
 
 	reply, err := mgr.WriteAsync(printerID, jobData)
 	if err == nil {
-		logger.Debug("Print job queued")
 		result := <-reply
 		if !result.OK {
 			err = result.Err
 		}
 	}
 	if err != nil {
-		retCode := ""
+		retCode := "EX_BADPORT"
 		if errors.Is(err, printer.ErrQueueFull) {
 			retCode = "TooManyRequests"
 			logger.Warn("Printer queue full")
-		} else {
-			retCode = "EX_BADPORT"
 		}
 		logger.Errorf("Print error [%s]: %v, Printer ID: %s", retCode, err, printerID)
-		return ctx.XML(EPOSResponse{Success: false, Code: retCode, Status: ""})
+		writeEPOSResponse(w, EPOSResponse{Success: false, Code: retCode, Status: ""})
+		return
 	}
+
 	logger.Infof("Print job completed successfully for printer: %s", printerID)
-	return ctx.XML(EPOSResponse{Success: true, Code: "", Status: ""})
+	writeEPOSResponse(w, EPOSResponse{Success: true, Code: "", Status: ""})
 }
 
-func printLabel(mgr *printer.Manager, ctx fiber.Ctx, printerID string) error {
-	jobData := ctx.Body()
-
+func printLabel(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string) {
+	jobData, err := readBody(w, r)
+	if err != nil {
+		return
+	}
 	if len(jobData) == 0 {
 		logger.Warn("Empty label data received")
-		return ctx.SendStatus(fiber.StatusBadRequest)
+		http.Error(w, "Empty label data", http.StatusBadRequest)
+		return
 	}
-
-	logger.Debugf("Processing label print job for printer: %s", printerID)
 
 	reply, err := mgr.WriteAsync(printerID, jobData)
 	if err == nil {
-		logger.Debug("Label print job queued")
 		result := <-reply
 		if !result.OK {
 			err = result.Err
 		}
 	}
-
 	if err != nil {
 		if errors.Is(err, printer.ErrQueueFull) {
 			logger.Warnf("Printer queue full, Printer ID: %s", printerID)
-			return ctx.SendStatus(fiber.StatusTooManyRequests)
+			http.Error(w, "Printer queue full", http.StatusTooManyRequests)
+			return
 		}
-
 		logger.Errorf("Print error: %v, Printer ID: %s", err, printerID)
-		return ctx.SendStatus(fiber.StatusInternalServerError)
+		http.Error(w, "Printer error", http.StatusInternalServerError)
+		return
 	}
 
-	logger.Debugf("Print job completed successfully for printer: %s", printerID)
-	return ctx.SendStatus(fiber.StatusOK)
+	logger.Infof("Print job completed successfully for printer: %s", printerID)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) StartError() error {
+	return s.startErr
 }
 
 func (s *Server) Stop() error {
 	logger.Infof("Stopping proxy servers")
-	s.httpRunning.Store(false)
-	s.httpsRunning.Store(false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+	defer cancel()
 
 	var firstErr error
-	if s.app != nil {
-		if err := s.app.Shutdown(); err != nil && firstErr == nil {
+	if s.httpServer != nil {
+		if err := s.httpServer.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) && firstErr == nil {
 			firstErr = err
 		}
 	}
-	if s.httpsApp != nil {
-		if err := s.httpsApp.Shutdown(); err != nil && firstErr == nil {
+	if s.httpsServer != nil {
+		if err := s.httpsServer.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) && firstErr == nil {
 			firstErr = err
 		}
 	}
+
+	s.httpRunning.Store(false)
+	s.httpsRunning.Store(false)
 	return firstErr
 }
 
 func (s *Server) Running() bool {
-	return s.httpRunning.Load() || s.httpsRunning.Load()
+	return s != nil && (s.httpRunning.Load() || s.httpsRunning.Load())
 }
 
 func (s *Server) HTTPSRunning() bool {
-	return s.httpsApp != nil && s.httpsRunning.Load()
+	return s != nil && s.httpsServer != nil && s.httpsRunning.Load()
 }
