@@ -3,12 +3,6 @@ name: Build macOS 11+
 on:
   workflow_dispatch:
 
-  # Temporary PR trigger for validating this macOS-specific fix.
-  # Remove again after the validation run is green.
-  pull_request:
-    branches:
-      - main
-
   push:
     tags:
       - "*"
