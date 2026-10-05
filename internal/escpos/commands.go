@@ -114,6 +114,9 @@ func BuildImage(b64data string, a ImageAttrs) ([]byte, error) {
 	if a.Width <= 0 || a.Height <= 0 {
 		return nil, fmt.Errorf("image dimensions must be positive")
 	}
+	if a.Width > maxImageBytes*8 || a.Height > maxImageBytes {
+		return nil, fmt.Errorf("image dimensions exceed safe limits")
+	}
 
 	bytesPerRow := (a.Width + 7) / 8
 	if bytesPerRow <= 0 || a.Height > maxImageBytes/bytesPerRow {
