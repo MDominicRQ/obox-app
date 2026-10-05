@@ -35,15 +35,47 @@ func newFiberApp(mgr *printer.Manager) *fiber.App {
 		AppName: "ePOS proxy",
 	})
 	app.Use(func(ctx fiber.Ctx) error {
-		logger.Debugf(
-			"Proxy request method=%s path=%s remote=%s origin=%q acrpn=%q",
-			ctx.Method(),
-			ctx.Path(),
-			ctx.IP(),
-			ctx.Get("Origin"),
-			ctx.Get("Access-Control-Request-Private-Network"),
+		method := ctx.Method()
+		path := ctx.Path()
+		remote := ctx.IP()
+		origin := ctx.Get("Origin")
+		requestMethod := ctx.Get("Access-Control-Request-Method")
+		requestHeaders := ctx.Get("Access-Control-Request-Headers")
+		requestPrivateNetwork := ctx.Get("Access-Control-Request-Private-Network")
+
+		err := ctx.Next()
+
+		response := ctx.Response()
+		status := 0
+		allowOrigin := ""
+		allowMethods := ""
+		allowHeaders := ""
+		allowPrivateNetwork := ""
+		if response != nil {
+			status = response.StatusCode()
+			allowOrigin = string(response.Header.Peek("Access-Control-Allow-Origin"))
+			allowMethods = string(response.Header.Peek("Access-Control-Allow-Methods"))
+			allowHeaders = string(response.Header.Peek("Access-Control-Allow-Headers"))
+			allowPrivateNetwork = string(response.Header.Peek("Access-Control-Allow-Private-Network"))
+		}
+
+		logger.Infof(
+			"Proxy request method=%s path=%s remote=%s origin=%q acrm=%q acrh=%q acrpn=%q status=%d acao=%q acam=%q acah=%q acapn=%q err=%v",
+			method,
+			path,
+			remote,
+			origin,
+			requestMethod,
+			requestHeaders,
+			requestPrivateNetwork,
+			status,
+			allowOrigin,
+			allowMethods,
+			allowHeaders,
+			allowPrivateNetwork,
+			err,
 		)
-		return ctx.Next()
+		return err
 	})
 
 	app.Use(cors.New(cors.Config{
@@ -89,12 +121,12 @@ func newFiberApp(mgr *printer.Manager) *fiber.App {
 
 	app.Post("/p/:printerId/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
 		printerId := ctx.Params("printerId")
-		logger.Debugf("Print request received for printer: %s", printerId)
+		logger.Infof("Print request received for printer: %s", printerId)
 		return printData(mgr, ctx, printerId)
 	})
 
 	app.Post("/cgi-bin/epos/service.cgi", func(ctx fiber.Ctx) error {
-		logger.Debugf("Print request received (auto printer selection)")
+		logger.Infof("Print request received (auto printer selection)")
 		return printData(mgr, ctx, "")
 	})
 
@@ -184,7 +216,7 @@ func printData(mgr *printer.Manager, ctx fiber.Ctx, printerID string) error {
 		logger.Errorf("Print error [%s]: %v, Printer ID: %s", retCode, err, printerID)
 		return ctx.XML(EPOSResponse{Success: false, Code: retCode, Status: ""})
 	}
-	logger.Debugf("Print job completed successfully for printer: %s", printerID)
+	logger.Infof("Print job completed successfully for printer: %s", printerID)
 	return ctx.XML(EPOSResponse{Success: true, Code: "", Status: ""})
 }
 
