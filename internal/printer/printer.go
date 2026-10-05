@@ -62,22 +62,26 @@ type Printer struct {
 	jobs    chan Job
 }
 
-func newPrinter(id string) *Printer {
-	// Check if this is a LAN printer
+func newPrinter(id string) (*Printer, error) {
 	if lanIP, ok := DecodeLANPrinterID(id); ok {
-		p := &Printer{
-			connectionType: ConnKindLAN,
-			lanIP:          lanIP,
-			jobs:           make(chan Job, QueueSize),
+		validatedIP, err := ValidateIPAddress(lanIP)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid LAN printer address", ErrInvalidPrinterID)
 		}
-		go p.loop()
-		return p
+		return &Printer{
+			connectionType: ConnKindLAN,
+			lanIP:          validatedIP,
+			jobs:           make(chan Job, QueueSize),
+		}, nil
 	}
 
-	// USB printer
-	var printerID *ID = nil
+	var printerID *ID
 	if id != "" {
-		printerID, _ = decodePrinterID(id)
+		decoded, err := decodePrinterID(id)
+		if err != nil {
+			return nil, err
+		}
+		printerID = decoded
 	}
 
 	p := &Printer{
@@ -87,8 +91,7 @@ func newPrinter(id string) *Printer {
 	}
 
 	logger.Debugf("Created new USB printer instance for ID: %s", p.idToString())
-	go p.loop()
-	return p
+	return p, nil
 }
 
 func (p *Printer) Enqueue(fn JobFunc, reply chan JobResult) error {
