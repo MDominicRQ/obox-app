@@ -41,3 +41,24 @@ jobs:
           package: false
           go-version: '1.26.0'
           node-version: '22.20.0'
+          wails-version: 'v2.12.0'
+
+      - name: Generate reproducible dependency snapshots
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          go mod tidy
+          cd frontend
+          npm install --package-lock-only --ignore-scripts
+
+      - name: Upload dependency snapshots
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-snapshots
+          path: |
+            go.mod
+            go.sum
+            frontend/package-lock.json
+          if-no-files-found: error
