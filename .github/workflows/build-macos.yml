@@ -156,6 +156,13 @@ jobs:
 
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
+      - name: Install vulnerability scanner
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
       # ============================================================
       # LIBUSB
       #
@@ -643,6 +650,13 @@ jobs:
 
           echo
           echo "Architecture verification successful."
+
+      - name: Scan compiled macOS binary for known Go vulnerabilities
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          "$(go env GOPATH)/bin/govulncheck" -mode=binary "$BIN"
 
       # ============================================================
       # VERIFY NO HOMEBREW / EXTERNAL LIBUSB
