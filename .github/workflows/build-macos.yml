@@ -11,9 +11,6 @@ permissions:
   contents: write
 
 env:
-  # Go 1.24 es la última rama de Go compatible con macOS 11.
-  GO_VERSION: "1.24.13"
-
   # Evita que Go descargue automáticamente un toolchain más nuevo
   # si alguna dependencia lo solicita.
   GOTOOLCHAIN: "local"
@@ -21,9 +18,6 @@ env:
   NODE_VERSION: "22"
 
   WAILS_VERSION: "v2.12.0"
-
-  # Big Sur 11.x en adelante.
-  MACOSX_DEPLOYMENT_TARGET: "11.0"
 
   LIBUSB_VERSION: "1.0.30"
   LIBUSB_SHA256: "fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf"
@@ -37,19 +31,33 @@ jobs:
 
       matrix:
         include:
-          # Apple Silicon
+          # Apple Silicon: keep the proven modern build unchanged.
           - arch: arm64
             runner: macos-15
             platform: darwin/arm64
             artifact: epos-proxy-macos-arm64-macos11plus
+            go_version: "1.24.13"
+            go_mod_version: "1.24.0"
+            fiber_version: "v3.0.0-beta.4"
+            deployment_target: "11.0"
 
-          # Intel
+          # Intel legacy: Catalina 10.15+.
+          # Go 1.22.12 is the last Go release supported on Catalina.
+          # Fiber beta.3 preserves the v3/PNA API while remaining compatible with Go 1.22.
           - arch: amd64
             runner: macos-15-intel
             platform: darwin/amd64
-            artifact: epos-proxy-macos-intel-macos11plus
+            artifact: epos-proxy-macos-intel-catalina10.15plus
+            go_version: "1.22.12"
+            go_mod_version: "1.22.0"
+            fiber_version: "v3.0.0-beta.3"
+            deployment_target: "10.15"
 
     runs-on: ${{ matrix.runner }}
+
+    env:
+      GO_VERSION: ${{ matrix.go_version }}
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
 
     steps:
       # ============================================================
@@ -90,21 +98,19 @@ jobs:
           brew install pkg-config
 
       # ============================================================
-      # MACOS 11 GO MODULE COMPATIBILITY
+      # TARGET-SPECIFIC GO MODULE COMPATIBILITY
       #
-      # Upstream actualmente utiliza:
+      # ARM64 / macOS 11+ keeps the already validated dependency set.
       #
-      #   Go 1.25+
-      #   Fiber v3.4
-      #   x/sys reciente
+      # Intel / Catalina uses the last Go toolchain supported by
+      # macOS 10.15 and Fiber beta.3, which exposes the same CORS/PNA
+      # API used by this project while remaining compatible with Go 1.22.
       #
-      # Eso ya no es compatible con macOS 11.
-      #
-      # Para nuestro build reemplazamos únicamente la resolución
-      # de dependencias. No modificamos el código de la aplicación.
+      # Application source code is shared; only build-time dependency
+      # resolution differs between the two macOS artifacts.
       # ============================================================
 
-      - name: Configure Go dependencies for macOS 11
+      - name: Configure Go dependencies for target
         shell: bash
         run: |
           set -euxo pipefail
@@ -112,11 +118,11 @@ jobs:
           cat > go.mod <<'EOF'
           module epos-proxy
 
-          go 1.24.0
+          go ${{ matrix.go_mod_version }}
 
           require (
               github.com/emersion/go-autostart v0.0.0-20250403115856-34830d6457d2
-              github.com/gofiber/fiber/v3 v3.0.0-beta.4
+              github.com/gofiber/fiber/v3 ${{ matrix.fiber_version }}
               github.com/google/gousb v1.1.3
               github.com/sirupsen/logrus v1.9.4
               github.com/wailsapp/wails/v2 v2.12.0
@@ -691,7 +697,22 @@ jobs:
           echo "vtool"
           echo "========================================"
 
-          vtool -show-build "$BIN" || true
+          VTOOL_OUTPUT="$(vtool -show-build "$BIN")"
+          printf '%s\n' "$VTOOL_OUTPUT"
+
+          EXPECTED_MINOS_REGEX="$(
+            printf '%s' "$MACOSX_DEPLOYMENT_TARGET" \
+              | sed 's/\./\\./g'
+          )"
+
+          if ! printf '%s\n' "$VTOOL_OUTPUT" \
+              | grep -Eq "minos[[:space:]]+${EXPECTED_MINOS_REGEX}([.]0)?([[:space:]]|$)"
+          then
+            echo
+            echo "ERROR:"
+            echo "Mach-O deployment target does not match ${MACOSX_DEPLOYMENT_TARGET}"
+            exit 1
+          fi
 
           echo
           echo "========================================"
@@ -702,6 +723,9 @@ jobs:
             | grep -A 10 -E \
               'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX' \
             || true
+
+          echo
+          echo "Deployment target verification successful."
 
       # ============================================================
       # AD-HOC SIGN
