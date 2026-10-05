@@ -141,14 +141,16 @@ func TestManager_ResolvePort(t *testing.T) {
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedEqual(t, resolved2, resolved)
 
-	// Case 3: Port is set but occupied -> Should resolve a new port
+	// Case 3: Once persisted, an occupied port must fail loudly rather than
+	// silently changing the endpoint configured in Odoo.
 	ln, err = net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", resolved))
 	testutil.ExpectedNoError(t, err)
 	defer ln.Close()
 
 	resolved3, err := cm.ResolvePort()
-	testutil.ExpectedNoError(t, err)
-	testutil.ExpectedNotEqual(t, resolved3, resolved)
+	testutil.ExpectedError(t, err)
+	testutil.ExpectedEqual(t, resolved3, 0)
+	testutil.ExpectedEqual(t, cm.Data.Port, resolved)
 }
 
 func TestManager_LANPrinters(t *testing.T) {
@@ -191,6 +193,8 @@ func TestManager_LANPrinters(t *testing.T) {
 	afterRemove := cm.GetLANPrinters()
 	testutil.ExpectedLen(t, afterRemove, 1)
 	testutil.ExpectedEqual(t, afterRemove[0], "192.168.1.101")
+	testutil.ExpectedFalse(t, cm.HasLANPrinter("192.168.1.100"))
+	testutil.ExpectedTrue(t, cm.HasLANPrinter("192.168.1.101"))
 
 	// Remove non-existent printer -> should return nil
 	err = cm.RemoveLANPrinter("10.0.0.99")
@@ -274,4 +278,22 @@ func TestManager_ResolveHTTPSPort(t *testing.T) {
 	err = json.Unmarshal(raw, &loaded)
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedEqual(t, loaded.HTTPSPort, resolved)
+}
+
+func TestManager_ResolveHTTPSPort_PersistedConflictFails(t *testing.T) {
+	tempDir := t.TempDir()
+	port := testutil.GetFreePort(t)
+	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
+	testutil.ExpectedNoError(t, err)
+	defer ln.Close()
+
+	cm := &Manager{
+		path: filepath.Join(tempDir, "config.json"),
+		Data: AppConfig{Port: 4545, HTTPSPort: port},
+	}
+
+	resolved, err := cm.ResolveHTTPSPort(4545)
+	testutil.ExpectedError(t, err)
+	testutil.ExpectedEqual(t, resolved, 0)
+	testutil.ExpectedEqual(t, cm.GetHTTPSPort(), port)
 }
