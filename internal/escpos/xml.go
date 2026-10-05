@@ -15,6 +15,37 @@ type xmlRawItem struct {
 	Content string
 }
 
+func readFlatElement(decoder *xml.Decoder, start xml.StartElement) (xmlRawItem, error) {
+	item := xmlRawItem{
+		XMLName: start.Name,
+		Attrs:   append([]xml.Attr(nil), start.Attr...),
+	}
+
+	var text strings.Builder
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return xmlRawItem{}, fmt.Errorf("XML parse error: unexpected end of <%s>", start.Name.Local)
+		}
+		if err != nil {
+			return xmlRawItem{}, fmt.Errorf("XML parse error: %w", err)
+		}
+
+		switch t := token.(type) {
+		case xml.CharData:
+			text.Write([]byte(t))
+		case xml.StartElement:
+			return xmlRawItem{}, fmt.Errorf("nested element <%s> is not supported inside <%s>", t.Name.Local, start.Name.Local)
+		case xml.EndElement:
+			if t.Name != start.Name {
+				return xmlRawItem{}, fmt.Errorf("unexpected closing element </%s>", t.Name.Local)
+			}
+			item.Content = text.String()
+			return item, nil
+		}
+	}
+}
+
 func parseEPOSPrintFragment(fragment string) ([]xmlRawItem, error) {
 	decoder := xml.NewDecoder(strings.NewReader(fragment))
 	decoder.Strict = true
@@ -45,41 +76,14 @@ func parseEPOSPrintFragment(fragment string) ([]xmlRawItem, error) {
 				return nil, fmt.Errorf("too many elements inside <epos-print>")
 			}
 
-			item := xmlRawItem{
-				XMLName: t.Name,
-				Attrs:   append([]xml.Attr(nil), t.Attr...),
+			item, itemErr := readFlatElement(decoder, t)
+			if itemErr != nil {
+				return nil, itemErr
 			}
-
-			var text strings.Builder
-			for {
-				child, childErr := decoder.Token()
-				if childErr == io.EOF {
-					return nil, fmt.Errorf("XML parse error: unexpected end of <%s>", t.Name.Local)
-				}
-				if childErr != nil {
-					return nil, fmt.Errorf("XML parse error: %w", childErr)
-				}
-
-				switch childToken := child.(type) {
-				case xml.CharData:
-					text.Write([]byte(childToken))
-				case xml.StartElement:
-					return nil, fmt.Errorf("nested element <%s> is not supported inside <%s>", childToken.Name.Local, t.Name.Local)
-				case xml.EndElement:
-					if childToken.Name == t.Name {
-						item.Content = text.String()
-						items = append(items, item)
-						goto itemDone
-					}
-					return nil, fmt.Errorf("unexpected closing element </%s>", childToken.Name.Local)
-				}
-			}
-		itemDone:
+			items = append(items, item)
 
 		case xml.EndElement:
 			if rootSeen && strings.ToLower(t.Name.Local) == "epos-print" {
-				// The fragment was sliced exactly through </epos-print>. Any
-				// further non-whitespace token would be malformed for our use.
 				return items, nil
 			}
 		}
