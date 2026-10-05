@@ -18,6 +18,12 @@ import (
 	"epos-proxy/internal/testutil"
 )
 
+func testResponse(s *Server, req *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	s.app.ServeHTTP(rec, req)
+	return rec.Result(), nil
+}
+
 func TestServer_Lifecycle(t *testing.T) {
 	port := testutil.GetFreePort(t)
 	mgr := printer.NewManager()
@@ -52,7 +58,7 @@ func TestPrintData_ValidXML_Success(t *testing.T) {
 	req := httptest.NewRequest("POST", url, bytes.NewReader([]byte(xmlPayload)))
 	req.Header.Set("Content-Type", "text/xml")
 
-	resp, err := s.app.Test(req)
+	resp, err := testResponse(s, req)
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedEqual(t, resp.StatusCode, http.StatusOK)
 
@@ -71,7 +77,7 @@ func TestPrintData_SchemaError(t *testing.T) {
 	req := httptest.NewRequest("POST", "/p/any-printer/cgi-bin/epos/service.cgi", bytes.NewReader([]byte(invalidPayload)))
 	req.Header.Set("Content-Type", "text/xml")
 
-	resp, err := s.app.Test(req)
+	resp, err := testResponse(s, req)
 	testutil.ExpectedNoError(t, err)
 
 	body, _ := io.ReadAll(resp.Body)
@@ -95,7 +101,7 @@ func TestPrintData_UnreachablePrinter_EX_BADPORT(t *testing.T) {
 	req := httptest.NewRequest("POST", url, bytes.NewReader([]byte(xmlPayload)))
 	req.Header.Set("Content-Type", "text/xml")
 
-	resp, err := s.app.Test(req)
+	resp, err := testResponse(s, req)
 	testutil.ExpectedNoError(t, err)
 
 	body, _ := io.ReadAll(resp.Body)
@@ -125,7 +131,7 @@ func TestPrintLabel_Success(t *testing.T) {
 	url := fmt.Sprintf("/p/%s/pstprnt", printerID)
 	req := httptest.NewRequest("POST", url, bytes.NewReader(labelData))
 
-	resp, err := s.app.Test(req)
+	resp, err := testResponse(s, req)
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedEqual(t, resp.StatusCode, http.StatusOK)
 }
@@ -137,7 +143,7 @@ func TestPrintLabel_EmptyBody_BadRequest(t *testing.T) {
 	defer s.Stop()
 
 	req := httptest.NewRequest("POST", "/p/any-printer/pstprnt", bytes.NewReader([]byte{}))
-	resp, err := s.app.Test(req)
+	resp, err := testResponse(s, req)
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedEqual(t, resp.StatusCode, http.StatusBadRequest)
 }
@@ -154,7 +160,7 @@ func TestPrintLabel_UnreachablePrinter_ServerError(t *testing.T) {
 	url := fmt.Sprintf("/p/%s/pstprnt", printerID)
 	req := httptest.NewRequest("POST", url, bytes.NewReader(labelData))
 
-	resp, err := s.app.Test(req)
+	resp, err := testResponse(s, req)
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedEqual(t, resp.StatusCode, http.StatusInternalServerError)
 }
@@ -169,7 +175,7 @@ func TestCORSHeaders(t *testing.T) {
 	req.Header.Set("Origin", "http://example.com")
 	req.Header.Set("Access-Control-Request-Method", "POST")
 
-	resp, err := s.app.Test(req)
+	resp, err := testResponse(s, req)
 	testutil.ExpectedNoError(t, err)
 
 	allowOrigin := resp.Header.Get("Access-Control-Allow-Origin")
@@ -209,7 +215,7 @@ func TestPrintData_AutoSelectRoute(t *testing.T) {
 			req := httptest.NewRequest("POST", "/cgi-bin/epos/service.cgi", bytes.NewReader([]byte(tc.payload)))
 			req.Header.Set("Content-Type", "text/xml")
 
-			resp, err := s.app.Test(req)
+			resp, err := testResponse(s, req)
 			testutil.ExpectedNoError(t, err)
 
 			body, err := io.ReadAll(resp.Body)
@@ -231,7 +237,7 @@ func TestPrinterBaseRouteIsBrowserTestable(t *testing.T) {
 
 	for _, path := range []string{"/", "/healthz", "/p/test-printer", "/p/test-printer/"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
-		resp, err := s.app.Test(req)
+		resp, err := testResponse(s, req)
 		testutil.ExpectedNoError(t, err)
 		testutil.ExpectedEqual(t, resp.StatusCode, http.StatusOK)
 
@@ -241,7 +247,7 @@ func TestPrinterBaseRouteIsBrowserTestable(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/p/test-printer", nil)
-	resp, err := s.app.Test(req)
+	resp, err := testResponse(s, req)
 	testutil.ExpectedNoError(t, err)
 	body, err := io.ReadAll(resp.Body)
 	testutil.ExpectedNoError(t, err)
@@ -260,7 +266,7 @@ func TestEPOSConnectivityCheckRoutes(t *testing.T) {
 		"/p/test-printer/cgi-bin/epos/service.cgi?devid=local_printer",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
-		resp, err := s.app.Test(req)
+		resp, err := testResponse(s, req)
 		testutil.ExpectedNoError(t, err)
 		testutil.ExpectedEqual(t, resp.StatusCode, http.StatusOK)
 
@@ -412,4 +418,52 @@ func TestServer_HTTPAndHTTPSEndpoints(t *testing.T) {
 			t.Fatalf("%s endpoint did not become ready: %v", tc.name, lastErr)
 		})
 	}
+}
+
+func TestServer_NetworkPrintingPolicyBlocksRemoteClients(t *testing.T) {
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	enabled := false
+	s := New(port, mgr, AccessPolicy{
+		NetworkPrintingEnabled: func() bool { return enabled },
+	})
+	defer s.Stop()
+
+	remoteReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	remoteReq.RemoteAddr = "192.168.50.20:54321"
+	resp, err := testResponse(s, remoteReq)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedEqual(t, resp.StatusCode, http.StatusForbidden)
+
+	localReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	localReq.RemoteAddr = "127.0.0.1:54321"
+	resp, err = testResponse(s, localReq)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedEqual(t, resp.StatusCode, http.StatusOK)
+
+	enabled = true
+	remoteReq = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	remoteReq.RemoteAddr = "192.168.50.20:54321"
+	resp, err = testResponse(s, remoteReq)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedEqual(t, resp.StatusCode, http.StatusOK)
+}
+
+func TestPrintData_InvalidImageDimensions_ReturnsSchemaError(t *testing.T) {
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	payload := `<epos-print><image width="-1" height="2">AA==</image></epos-print>`
+	req := httptest.NewRequest(http.MethodPost, "/cgi-bin/epos/service.cgi", bytes.NewReader([]byte(payload)))
+	req.Header.Set("Content-Type", "text/xml")
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedEqual(t, resp.StatusCode, http.StatusOK)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `success="false"`)
+	testutil.ExpectedContains(t, string(body), `code="SchemaError"`)
 }
