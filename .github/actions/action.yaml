@@ -36,11 +36,11 @@ inputs:
         go-version:
                 description: "Version of Go to use"
                 required: false
-                default: "^1.18"
+                default: "1.26.6"
         node-version:
                 description: "Node js version"
                 required: false
-                default: "16.x"
+                default: "22.20.0"
         deno-build:
                 description: "This gets run into bash, use the full command"
                 required: false
