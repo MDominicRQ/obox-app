@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"epos-proxy/internal/certs"
 	"epos-proxy/internal/config"
 	"epos-proxy/internal/logger"
 	"epos-proxy/internal/printer"
@@ -111,13 +112,33 @@ func TestApp_GetPrinterHTTPSUrl(t *testing.T) {
 	cfg, err := config.NewManager()
 	testutil.ExpectedNoError(t, err)
 
+	// A configured HTTPS port alone is not enough: do not publish a dead URL.
 	srv := &server.Server{Port: 4545, HTTPSPort: 4645}
 	app := &App{config: cfg, webserver: srv}
 
 	id := "bDoxOTIuMTY4LjEuMzM"
-	expectedHost := util.GetLocalIP(app.IsNetworkPrintingEnabled())
-	testutil.ExpectedEqual(t, app.GetPrinterUrl(id), fmt.Sprintf("%s:4545/p/%s", expectedHost, id))
-	testutil.ExpectedEqual(t, app.GetPrinterHTTPSUrl(id), fmt.Sprintf("%s:4645/p/%s", expectedHost, id))
+	testutil.ExpectedEqual(t, app.GetPrinterUrl(id), fmt.Sprintf("%s:4545/p/%s", util.LOCALHOST_IP, id))
+	testutil.ExpectedEqual(t, app.GetPrinterHTTPSUrl(id), "")
+
+	httpPort := testutil.GetFreePort(t)
+	httpsPort := testutil.GetFreePort(t)
+	for httpsPort == httpPort {
+		httpsPort = testutil.GetFreePort(t)
+	}
+
+	paths, err := certs.Ensure(t.TempDir(), "127.0.0.1")
+	testutil.ExpectedNoError(t, err)
+
+	running := server.NewWithTLS(httpPort, httpsPort, paths.ServerCert, paths.ServerKey, printer.NewManager())
+	defer running.Stop()
+	testutil.ExpectedNoError(t, running.StartError())
+
+	app.webserver = running
+	testutil.ExpectedEqual(
+		t,
+		app.GetPrinterHTTPSUrl(id),
+		fmt.Sprintf("%s:%d/p/%s", util.LOCALHOST_IP, httpsPort, id),
+	)
 }
 
 func TestApp_GetPrinterNetworkUrls(t *testing.T) {
@@ -142,7 +163,24 @@ func TestApp_GetPrinterNetworkUrls(t *testing.T) {
 	}
 
 	testutil.ExpectedEqual(t, app.GetPrinterNetworkUrl(id), fmt.Sprintf("%s:4545/p/%s", host, id))
-	testutil.ExpectedEqual(t, app.GetPrinterNetworkHTTPSUrl(id), fmt.Sprintf("%s:4645/p/%s", host, id))
+	// The synthetic server has no live TLS listener, so HTTPS must stay hidden.
+	testutil.ExpectedEqual(t, app.GetPrinterNetworkHTTPSUrl(id), "")
+
+	httpPort := testutil.GetFreePort(t)
+	httpsPort := testutil.GetFreePort(t)
+	for httpsPort == httpPort {
+		httpsPort = testutil.GetFreePort(t)
+	}
+
+	paths, err := certs.Ensure(t.TempDir(), "127.0.0.1")
+	testutil.ExpectedNoError(t, err)
+
+	running := server.NewWithTLS(httpPort, httpsPort, paths.ServerCert, paths.ServerKey, printer.NewManager())
+	defer running.Stop()
+	testutil.ExpectedNoError(t, running.StartError())
+
+	app.webserver = running
+	testutil.ExpectedEqual(t, app.GetPrinterNetworkHTTPSUrl(id), fmt.Sprintf("%s:%d/p/%s", host, httpsPort, id))
 }
 
 func TestApp_AddLANPrinter(t *testing.T) {
