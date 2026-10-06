@@ -230,7 +230,7 @@ func (a *App) GetPrinterUrl(id string) string {
 }
 
 func (a *App) GetPrinterHTTPSUrl(id string) string {
-	if a.webserver == nil || a.webserver.HTTPSPort <= 0 {
+	if a.webserver == nil || !a.webserver.HTTPSRunning() {
 		return ""
 	}
 	url := fmt.Sprintf("%s:%d/p/%s", util.LOCALHOST_IP, a.webserver.HTTPSPort, id)
@@ -252,7 +252,7 @@ func (a *App) GetPrinterNetworkUrl(id string) string {
 }
 
 func (a *App) GetPrinterNetworkHTTPSUrl(id string) string {
-	if a.webserver == nil || a.webserver.HTTPSPort <= 0 || !a.config.IsNetworkPrintingEnabled() {
+	if a.webserver == nil || !a.webserver.HTTPSRunning() || !a.config.IsNetworkPrintingEnabled() {
 		return ""
 	}
 	host := util.GetLocalIP(true)
@@ -473,7 +473,7 @@ func (a *App) ShowProxyDiagnostics() {
 
 	httpURL := fmt.Sprintf("http://%s:%d/healthz", util.LOCALHOST_IP, a.webserver.Port)
 	httpsURL := ""
-	if a.webserver.HTTPSPort > 0 {
+	if a.webserver.HTTPSRunning() {
 		httpsURL = fmt.Sprintf("https://%s:%d/healthz", util.LOCALHOST_IP, a.webserver.HTTPSPort)
 	}
 
