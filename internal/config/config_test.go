@@ -19,6 +19,7 @@ func TestNewManager(t *testing.T) {
 	testutil.ExpectedNotNil(t, cm)
 	testutil.ExpectedTrue(t, cm.Path() != "", "Expected non-empty config path")
 	testutil.ExpectedEqual(t, cm.Data.Port, 0)
+	testutil.ExpectedEqual(t, cm.Data.HTTPSPort, 0)
 }
 
 func TestManager_Load(t *testing.T) {
@@ -46,6 +47,7 @@ func TestManager_Load(t *testing.T) {
 	err = cm.Load()
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedEqual(t, cm.Data.Port, 4550)
+	testutil.ExpectedEqual(t, cm.Data.HTTPSPort, 0)
 	testutil.ExpectedLen(t, cm.Data.LANPrinters, 2)
 	testutil.ExpectedEqual(t, cm.Data.LANPrinters[0], "192.168.1.10")
 	testutil.ExpectedEqual(t, cm.Data.LANPrinters[1], "192.168.1.20")
@@ -66,6 +68,7 @@ func TestManager_Save(t *testing.T) {
 		path: configFile,
 		Data: AppConfig{
 			Port:        4548,
+			HTTPSPort:   4648,
 			LANPrinters: []string{"10.0.0.5"},
 		},
 	}
@@ -82,6 +85,7 @@ func TestManager_Save(t *testing.T) {
 	err = json.Unmarshal(data, &loaded)
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedEqual(t, loaded.Port, 4548)
+	testutil.ExpectedEqual(t, loaded.HTTPSPort, 4648)
 	testutil.ExpectedLen(t, loaded.LANPrinters, 1)
 	testutil.ExpectedEqual(t, loaded.LANPrinters[0], "10.0.0.5")
 
@@ -97,7 +101,7 @@ func TestIsPortAvailable(t *testing.T) {
 	testutil.ExpectedTrue(t, isPortAvailable(port), "Expected port to be available")
 
 	// Occupy the port and test again
-	lnOccupied, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	lnOccupied, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
 	testutil.ExpectedNoError(t, err)
 	defer lnOccupied.Close()
 
@@ -137,14 +141,16 @@ func TestManager_ResolvePort(t *testing.T) {
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedEqual(t, resolved2, resolved)
 
-	// Case 3: Port is set but occupied -> Should resolve a new port
-	ln, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", resolved))
+	// Case 3: Once persisted, an occupied port must fail loudly rather than
+	// silently changing the endpoint configured in Odoo.
+	ln, err = net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", resolved))
 	testutil.ExpectedNoError(t, err)
 	defer ln.Close()
 
 	resolved3, err := cm.ResolvePort()
-	testutil.ExpectedNoError(t, err)
-	testutil.ExpectedNotEqual(t, resolved3, resolved)
+	testutil.ExpectedError(t, err)
+	testutil.ExpectedEqual(t, resolved3, 0)
+	testutil.ExpectedEqual(t, cm.Data.Port, resolved)
 }
 
 func TestManager_LANPrinters(t *testing.T) {
@@ -187,6 +193,8 @@ func TestManager_LANPrinters(t *testing.T) {
 	afterRemove := cm.GetLANPrinters()
 	testutil.ExpectedLen(t, afterRemove, 1)
 	testutil.ExpectedEqual(t, afterRemove[0], "192.168.1.101")
+	testutil.ExpectedFalse(t, cm.HasLANPrinter("192.168.1.100"))
+	testutil.ExpectedTrue(t, cm.HasLANPrinter("192.168.1.101"))
 
 	// Remove non-existent printer -> should return nil
 	err = cm.RemoveLANPrinter("10.0.0.99")
@@ -223,7 +231,7 @@ func TestFindAvailablePort_RangeExhausted(t *testing.T) {
 	end := start + 2
 	var listeners []net.Listener
 	for p := start; p <= end; p++ {
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p))
 		if err != nil {
 			for _, l := range listeners {
 				_ = l.Close()
@@ -243,4 +251,49 @@ func TestFindAvailablePort_RangeExhausted(t *testing.T) {
 	testutil.ExpectedError(t, err)
 	testutil.ExpectedTrue(t, errors.Is(err, ErrNoAvailablePort))
 	testutil.ExpectedEqual(t, port, 0)
+}
+
+
+func TestManager_ResolveHTTPSPort(t *testing.T) {
+	tempDir := t.TempDir()
+	cm := &Manager{
+		path: filepath.Join(tempDir, "config.json"),
+		Data: AppConfig{Port: 4545},
+	}
+
+	resolved, err := cm.ResolveHTTPSPort(4545)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedTrue(t, resolved >= HTTPSPortRangeStart && resolved <= HTTPSPortRangeEnd)
+	testutil.ExpectedNotEqual(t, resolved, 4545)
+	testutil.ExpectedEqual(t, cm.GetHTTPSPort(), resolved)
+
+	resolvedAgain, err := cm.ResolveHTTPSPort(4545)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedEqual(t, resolvedAgain, resolved)
+
+	raw, err := os.ReadFile(cm.path)
+	testutil.ExpectedNoError(t, err)
+
+	var loaded AppConfig
+	err = json.Unmarshal(raw, &loaded)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedEqual(t, loaded.HTTPSPort, resolved)
+}
+
+func TestManager_ResolveHTTPSPort_PersistedConflictFails(t *testing.T) {
+	tempDir := t.TempDir()
+	port := testutil.GetFreePort(t)
+	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
+	testutil.ExpectedNoError(t, err)
+	defer ln.Close()
+
+	cm := &Manager{
+		path: filepath.Join(tempDir, "config.json"),
+		Data: AppConfig{Port: 4545, HTTPSPort: port},
+	}
+
+	resolved, err := cm.ResolveHTTPSPort(4545)
+	testutil.ExpectedError(t, err)
+	testutil.ExpectedEqual(t, resolved, 0)
+	testutil.ExpectedEqual(t, cm.GetHTTPSPort(), port)
 }

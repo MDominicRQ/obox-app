@@ -17,7 +17,8 @@ func TestNewPrinter_LAN(t *testing.T) {
 	lanIP := "192.168.1.55"
 	encodedID := EncodeLANPrinterID(lanIP)
 
-	p := newPrinter(encodedID)
+	p, err := newPrinter(encodedID)
+	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedNotNil(t, p)
 	testutil.ExpectedEqual(t, p.connectionType, ConnKindLAN)
 	testutil.ExpectedEqual(t, p.lanIP, lanIP)
@@ -34,7 +35,8 @@ func TestNewPrinter_USB(t *testing.T) {
 	encodedSerial, err := encodePrinterID(printerWithSerial)
 	testutil.ExpectedNoError(t, err)
 
-	pSerial := newPrinter(encodedSerial)
+	pSerial, err := newPrinter(encodedSerial)
+	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedNotNil(t, pSerial)
 	testutil.ExpectedEqual(t, pSerial.connectionType, ConnKindUSB)
 	testutil.ExpectedNotNil(t, pSerial.id)
@@ -46,7 +48,8 @@ func TestNewPrinter_USB(t *testing.T) {
 	encodedVidPidPath, err := encodePrinterID(printerWithVidPidPath)
 	testutil.ExpectedNoError(t, err)
 
-	pVidPidPath := newPrinter(encodedVidPidPath)
+	pVidPidPath, err := newPrinter(encodedVidPidPath)
+	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedNotNil(t, pVidPidPath)
 	testutil.ExpectedEqual(t, pVidPidPath.connectionType, ConnKindUSB)
 	testutil.ExpectedNotNil(t, pVidPidPath.id)
@@ -57,18 +60,18 @@ func TestNewPrinter_USB(t *testing.T) {
 
 func TestNewPrinter_EdgeCases(t *testing.T) {
 	// Empty string ID -> USB with nil ID
-	pEmpty := newPrinter("")
+	pEmpty, err := newPrinter("")
+	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedNotNil(t, pEmpty)
 	testutil.ExpectedEqual(t, pEmpty.connectionType, ConnKindUSB)
 	testutil.ExpectedNil(t, pEmpty.id)
 	pEmpty.close()
 
-	// Invalid base64 ID -> USB with nil ID (decodePrinterID fails safely)
-	pInvalid := newPrinter("!not-valid-base64!")
-	testutil.ExpectedNotNil(t, pInvalid)
-	testutil.ExpectedEqual(t, pInvalid.connectionType, ConnKindUSB)
-	testutil.ExpectedNil(t, pInvalid.id)
-	pInvalid.close()
+	// Invalid explicit IDs must be rejected instead of silently falling back
+	// to auto-selecting the first USB printer.
+	pInvalid, err := newPrinter("!not-valid-base64!")
+	testutil.ExpectedNil(t, pInvalid)
+	testutil.ExpectedTrue(t, errors.Is(err, ErrInvalidPrinterID))
 }
 
 func TestPrinter_EnsureOpenLAN_SuccessAndReusing(t *testing.T) {

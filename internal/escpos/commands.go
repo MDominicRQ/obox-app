@@ -11,21 +11,74 @@ const (
 	LF  byte = 0x0A
 
 	maxImgSliceHeight = 255
+	maxImageBytes     = 4 * 1024 * 1024
 )
 
 var (
 	// CmdCut full paper cut.
 	CmdCut = []byte{GS, 0x56, 0x41, LF}
 
+	// CmdPulse matches Epson ePOS-Print's default <pulse/> semantics:
+	// drawer_1 (kick connector pin 2) with a 100 ms signal.
+	// ESC p expresses t1/t2 in 2 ms units, so 0x32 = 50 * 2 ms = 100 ms.
 	CmdPulse = []byte{
 		ESC, 0x3D, 0x01,
-		ESC, 0x70, 0x00, 0x19, 0x19, // pin 2
-		ESC, 0x70, 0x01, 0x19, 0x19, // pin 5
+		ESC, 0x70, 0x00, 0x32, 0x32,
 	}
 
 	// CmdInit Resets the printer to its default state.
 	CmdInit = []byte{ESC, 0x40}
 )
+
+type PulseAttrs struct {
+	Drawer string // "drawer_1" | "drawer_2"
+	Time   string // "pulse_100" | ... | "pulse_500"
+}
+
+// BuildPulse translates Epson ePOS-Print <pulse> semantics into ESC/POS.
+// ePOS defaults omitted attributes to drawer_1 and pulse_100.
+func BuildPulse(a PulseAttrs) ([]byte, error) {
+	drawer := a.Drawer
+	if drawer == "" {
+		drawer = "drawer_1"
+	}
+
+	var pin byte
+	switch drawer {
+	case "drawer_1":
+		pin = 0x00
+	case "drawer_2":
+		pin = 0x01
+	default:
+		return nil, fmt.Errorf("unsupported pulse drawer %q", a.Drawer)
+	}
+
+	pulseTime := a.Time
+	if pulseTime == "" {
+		pulseTime = "pulse_100"
+	}
+
+	var ticks byte
+	switch pulseTime {
+	case "pulse_100":
+		ticks = 50
+	case "pulse_200":
+		ticks = 100
+	case "pulse_300":
+		ticks = 150
+	case "pulse_400":
+		ticks = 200
+	case "pulse_500":
+		ticks = 250
+	default:
+		return nil, fmt.Errorf("unsupported pulse time %q", a.Time)
+	}
+
+	return []byte{
+		ESC, 0x3D, 0x01,
+		ESC, 0x70, pin, ticks, ticks,
+	}, nil
+}
 
 type TextAttrs struct {
 	Align        string // "left" | "center" | "right"
@@ -110,6 +163,22 @@ type ImageAttrs struct {
 // GS v 0 command stream needed to print it. The image is sliced into chunks
 // of at most 255 rows to satisfy the command's yL byte limit.
 func BuildImage(b64data string, a ImageAttrs) ([]byte, error) {
+	if a.Width <= 0 || a.Height <= 0 {
+		return nil, fmt.Errorf("image dimensions must be positive")
+	}
+	if a.Width > maxImageBytes*8 || a.Height > maxImageBytes {
+		return nil, fmt.Errorf("image dimensions exceed safe limits")
+	}
+
+	bytesPerRow := (a.Width + 7) / 8
+	if bytesPerRow <= 0 || a.Height > maxImageBytes/bytesPerRow {
+		return nil, fmt.Errorf("image dimensions exceed safe limits")
+	}
+	expectedLen := bytesPerRow * a.Height
+	if expectedLen > maxImageBytes {
+		return nil, fmt.Errorf("image data exceeds %d bytes", maxImageBytes)
+	}
+
 	raw, err := base64.StdEncoding.DecodeString(b64data)
 	if err != nil {
 		raw, err = base64.RawStdEncoding.DecodeString(b64data)
@@ -117,9 +186,6 @@ func BuildImage(b64data string, a ImageAttrs) ([]byte, error) {
 			return nil, fmt.Errorf("base64 decode: %w", err)
 		}
 	}
-
-	bytesPerRow := (a.Width + 7) / 8
-	expectedLen := bytesPerRow * a.Height
 
 	switch {
 	case len(raw) < expectedLen:

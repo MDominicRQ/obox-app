@@ -1,4 +1,8 @@
-name: Build macOS 11+
+name: Build macOS
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 on:
   workflow_dispatch:
@@ -8,22 +12,16 @@ on:
       - "*"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
-  # Go 1.24 es la última rama de Go compatible con macOS 11.
-  GO_VERSION: "1.24.13"
-
   # Evita que Go descargue automáticamente un toolchain más nuevo
   # si alguna dependencia lo solicita.
   GOTOOLCHAIN: "local"
 
-  NODE_VERSION: "22"
+  NODE_VERSION: "22.20.0"
 
   WAILS_VERSION: "v2.12.0"
-
-  # Big Sur 11.x en adelante.
-  MACOSX_DEPLOYMENT_TARGET: "11.0"
 
   LIBUSB_VERSION: "1.0.30"
   LIBUSB_SHA256: "fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf"
@@ -37,19 +35,30 @@ jobs:
 
       matrix:
         include:
-          # Apple Silicon
+          # Apple Silicon: keep the proven modern build unchanged.
           - arch: arm64
             runner: macos-15
             platform: darwin/arm64
             artifact: epos-proxy-macos-arm64-macos11plus
+            go_version: "1.24.13"
+            go_mod_version: "1.24.0"
+            deployment_target: "11.0"
 
-          # Intel
+          # Intel legacy: Catalina 10.15+.
+          # Go 1.22.12 is the last Go release supported on Catalina.
           - arch: amd64
             runner: macos-15-intel
             platform: darwin/amd64
-            artifact: epos-proxy-macos-intel-macos11plus
+            artifact: epos-proxy-macos-intel-catalina10.15plus
+            go_version: "1.22.12"
+            go_mod_version: "1.22.0"
+            deployment_target: "10.15"
 
     runs-on: ${{ matrix.runner }}
+
+    env:
+      GO_VERSION: ${{ matrix.go_version }}
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
 
     steps:
       # ============================================================
@@ -90,21 +99,15 @@ jobs:
           brew install pkg-config
 
       # ============================================================
-      # MACOS 11 GO MODULE COMPATIBILITY
+      # TARGET-SPECIFIC GO MODULE COMPATIBILITY
       #
-      # Upstream actualmente utiliza:
-      #
-      #   Go 1.25+
-      #   Fiber v3.4
-      #   x/sys reciente
-      #
-      # Eso ya no es compatible con macOS 11.
-      #
-      # Para nuestro build reemplazamos únicamente la resolución
-      # de dependencias. No modificamos el código de la aplicación.
+      # ARM64 / macOS 11+ keeps Go 1.24.13.
+      # Intel / Catalina uses Go 1.22.12, the last Go release supported
+      # by macOS 10.15. The proxy server itself uses the standard library,
+      # so no web-framework downgrade is required for the legacy target.
       # ============================================================
 
-      - name: Configure Go dependencies for macOS 11
+      - name: Configure Go dependencies for target
         shell: bash
         run: |
           set -euxo pipefail
@@ -112,11 +115,10 @@ jobs:
           cat > go.mod <<'EOF'
           module epos-proxy
 
-          go 1.24.0
+          go ${{ matrix.go_mod_version }}
 
           require (
               github.com/emersion/go-autostart v0.0.0-20250403115856-34830d6457d2
-              github.com/gofiber/fiber/v3 v3.0.0-beta.4
               github.com/google/gousb v1.1.3
               github.com/sirupsen/logrus v1.9.4
               github.com/wailsapp/wails/v2 v2.12.0
@@ -157,6 +159,13 @@ jobs:
             github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
 
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install vulnerability scanner
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
 
       # ============================================================
       # LIBUSB
@@ -526,6 +535,59 @@ jobs:
             "$PLIST"
 
       # ============================================================
+      # VERIFY BUNDLE IDENTITY / LOCAL NETWORK METADATA
+      # ============================================================
+
+      - name: Verify macOS bundle identity and Local Network metadata
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PLIST="${APP_PATH}/Contents/Info.plist"
+
+          BUNDLE_ID="$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :CFBundleIdentifier" \
+              "$PLIST"
+          )"
+
+          echo "CFBundleIdentifier: $BUNDLE_ID"
+
+          if [ "$BUNDLE_ID" != "com.wails.epos-proxy" ]; then
+            echo "ERROR: unexpected CFBundleIdentifier: $BUNDLE_ID"
+            exit 1
+          fi
+
+          if printf '%s' "$BUNDLE_ID" | grep -Eq '[^A-Za-z0-9.-]'; then
+            echo "ERROR: CFBundleIdentifier contains invalid characters"
+            exit 1
+          fi
+
+          LOCAL_NETWORK_USAGE="$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :NSLocalNetworkUsageDescription" \
+              "$PLIST"
+          )"
+
+          if [ -z "$LOCAL_NETWORK_USAGE" ]; then
+            echo "ERROR: NSLocalNetworkUsageDescription is missing or empty"
+            exit 1
+          fi
+
+          ALLOWS_LOCAL_NETWORKING="$(
+            /usr/libexec/PlistBuddy \
+              -c "Print :NSAppTransportSecurity:NSAllowsLocalNetworking" \
+              "$PLIST"
+          )"
+
+          if [ "$ALLOWS_LOCAL_NETWORKING" != "true" ]; then
+            echo "ERROR: NSAllowsLocalNetworking must be true"
+            exit 1
+          fi
+
+          echo "macOS bundle identity and Local Network metadata verified."
+
+      # ============================================================
       # LOCATE EXECUTABLE
       # ============================================================
 
@@ -593,6 +655,27 @@ jobs:
           echo
           echo "Architecture verification successful."
 
+      - name: Report known vulnerabilities in legacy macOS binary
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # These compatibility artifacts intentionally use the final Go
+          # toolchains that still support their minimum macOS versions:
+          #
+          #   arm64 / macOS 11+  -> Go 1.24.13
+          #   amd64 / macOS 10.15+ -> Go 1.22.12
+          #
+          # Both toolchains are EOL and therefore contain known standard-library
+          # findings whose fixes require newer Go releases that also raise the
+          # minimum supported macOS version. Keep the binary scan visible, but
+          # do not turn that unavoidable compatibility tradeoff into a false CI
+          # failure. The supported-toolchain source scan in PR Validation remains
+          # blocking.
+          if ! "$(go env GOPATH)/bin/govulncheck" -mode=binary "$BIN"; then
+            echo "::warning::Legacy macOS compatibility binary contains known vulnerabilities in its EOL Go runtime and/or compatibility dependencies. Review the report above and SECURITY.md."
+          fi
+
       # ============================================================
       # VERIFY NO HOMEBREW / EXTERNAL LIBUSB
       # ============================================================
@@ -638,7 +721,22 @@ jobs:
           echo "vtool"
           echo "========================================"
 
-          vtool -show-build "$BIN" || true
+          VTOOL_OUTPUT="$(vtool -show-build "$BIN")"
+          printf '%s\n' "$VTOOL_OUTPUT"
+
+          EXPECTED_MINOS_REGEX="$(
+            printf '%s' "$MACOSX_DEPLOYMENT_TARGET" \
+              | sed 's/\./\\./g'
+          )"
+
+          if ! printf '%s\n' "$VTOOL_OUTPUT" \
+              | grep -Eq "minos[[:space:]]+${EXPECTED_MINOS_REGEX}([.]0)?([[:space:]]|$)"
+          then
+            echo
+            echo "ERROR:"
+            echo "Mach-O deployment target does not match ${MACOSX_DEPLOYMENT_TARGET}"
+            exit 1
+          fi
 
           echo
           echo "========================================"
@@ -649,6 +747,9 @@ jobs:
             | grep -A 10 -E \
               'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX' \
             || true
+
+          echo
+          echo "Deployment target verification successful."
 
       # ============================================================
       # AD-HOC SIGN
@@ -765,6 +866,9 @@ jobs:
 
     needs:
       - build-macos
+
+    permissions:
+      contents: write
 
     runs-on: ubuntu-latest
 

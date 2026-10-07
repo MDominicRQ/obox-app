@@ -117,3 +117,18 @@ func TestManager_WriteAsync_PrinterNotFound(t *testing.T) {
 	testutil.ExpectedError(t, err)
 	testutil.ExpectedNil(t, replyChan)
 }
+
+func TestManager_RejectsInvalidExplicitPrinterID(t *testing.T) {
+	mgr := NewManager()
+	_, err := mgr.Get("not-a-valid-printer-id!!!")
+	testutil.ExpectedTrue(t, errors.Is(err, ErrInvalidPrinterID))
+}
+
+func TestManager_RejectsUnconfiguredLANPrinter(t *testing.T) {
+	mgr := NewManager(func(ip string) bool {
+		return ip == "192.168.1.33"
+	})
+
+	_, err := mgr.Get(EncodeLANPrinterID("192.168.1.99"))
+	testutil.ExpectedTrue(t, errors.Is(err, ErrLANPrinterNotAllowed))
+}

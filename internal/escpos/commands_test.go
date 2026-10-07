@@ -187,6 +187,40 @@ func TestBuildText_Combined(t *testing.T) {
 	testutil.ExpectedBytesEqual(t, got, expected)
 }
 
+func TestBuildPulse_DefaultEPOSSemantics(t *testing.T) {
+	got, err := BuildPulse(PulseAttrs{})
+	testutil.ExpectedNoError(t, err)
+
+	expected := []byte{
+		ESC, 0x3D, 0x01,
+		ESC, 0x70, 0x00, 0x32, 0x32,
+	}
+	testutil.ExpectedBytesEqual(t, got, expected)
+	testutil.ExpectedBytesEqual(t, got, CmdPulse)
+}
+
+func TestBuildPulse_ExplicitDrawerAndTime(t *testing.T) {
+	got, err := BuildPulse(PulseAttrs{
+		Drawer: "drawer_2",
+		Time:   "pulse_500",
+	})
+	testutil.ExpectedNoError(t, err)
+
+	expected := []byte{
+		ESC, 0x3D, 0x01,
+		ESC, 0x70, 0x01, 0xFA, 0xFA,
+	}
+	testutil.ExpectedBytesEqual(t, got, expected)
+}
+
+func TestBuildPulse_RejectsUnsupportedValues(t *testing.T) {
+	_, err := BuildPulse(PulseAttrs{Drawer: "drawer_3"})
+	testutil.ExpectedError(t, err)
+
+	_, err = BuildPulse(PulseAttrs{Time: "pulse_600"})
+	testutil.ExpectedError(t, err)
+}
+
 func TestBuildImage_LeftAlignment(t *testing.T) {
 	bitmap := []byte{0xFF}
 	b64 := base64.StdEncoding.EncodeToString(bitmap)
@@ -296,4 +330,21 @@ func TestBuildImage_DataHandling(t *testing.T) {
 
 	// Verify Chunk 2 header (0x2D = 45)
 	testutil.ExpectedBytesEqual(t, got[263:263+8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0x2D, 0x00})
+}
+
+func TestBuildImage_RejectsUnsafeDimensions(t *testing.T) {
+	tests := []ImageAttrs{
+		{Width: -1, Height: 1},
+		{Width: 1, Height: -1},
+		{Width: 0, Height: 1},
+		{Width: 1, Height: 0},
+		{Width: maxImageBytes*8 + 1, Height: 1},
+		{Width: 8, Height: maxImageBytes + 1},
+	}
+
+	for _, attrs := range tests {
+		if _, err := BuildImage("AA==", attrs); err == nil {
+			t.Fatalf("expected unsafe image dimensions to be rejected: %+v", attrs)
+		}
+	}
 }

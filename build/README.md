@@ -20,6 +20,20 @@ The directory contains the following files:
 - `Info.plist` - the main plist file used for Mac builds. It is used when building using `wails build`.
 - `Info.dev.plist` - same as the main plist file but used when building using `wails dev`.
 
+
+### macOS build source of truth
+
+macOS release/test artifacts are built by `.github/workflows/build-macos.yml`.
+Do not recreate a separate local packaging path: the workflow intentionally
+uses static libusb, target-specific Go toolchains, verified deployment targets,
+bundle metadata checks and signing validation for both Apple Silicon and Intel.
+
+- Apple Silicon: macOS 11+
+- Intel: macOS 10.15+
+
+The legacy `build/build-darwin.sh` path and relaxed signing entitlements were
+removed so there is only one supported macOS build procedure.
+
 ## Windows
 
 The `windows` directory contains the manifest and rc files used when building with `wails build`.

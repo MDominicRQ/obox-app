@@ -28,7 +28,7 @@ inputs:
         wails-version:
                 description: "Wails version to use"
                 required: false
-                default: "latest"
+                default: "v2.12.0"
         wails-build-webview2:
                 description: "Webview2 installer method [download,embed,browser,error]"
                 required: false
@@ -36,11 +36,11 @@ inputs:
         go-version:
                 description: "Version of Go to use"
                 required: false
-                default: "^1.18"
+                default: "1.26.6"
         node-version:
                 description: "Node js version"
                 required: false
-                default: "16.x"
+                default: "22.20.0"
         deno-build:
                 description: "This gets run into bash, use the full command"
                 required: false
@@ -102,7 +102,7 @@ runs:
         steps:
                 # Setup and configure GoLang
                 - name: Setup GoLang
-                  uses: actions/setup-go@v3
+                  uses: actions/setup-go@v5
                   with:
                           check-latest: true
                           cache: true
@@ -111,7 +111,7 @@ runs:
                   shell: bash
                 # Setup and configure NodeJS
                 - name: Setup NodeJS
-                  uses: actions/setup-node@v2
+                  uses: actions/setup-node@v4
                   with:
                           node-version: ${{inputs.node-version}}
                 # (Optional) Setup and configure Deno
@@ -150,6 +150,14 @@ runs:
                       mingw-w64-x86_64-gcc
                       mingw-w64-x86_64-pkg-config
                       mingw-w64-x86_64-nsis
+
+                - name: Prepare frontend embed directory
+                  if: inputs.build == 'true'
+                  working-directory: ${{ inputs.app-working-directory }}
+                  shell: bash
+                  run: |
+                    mkdir -p frontend/dist
+                    touch frontend/dist/.gitkeep
 
                 # Building step
                 - name: Build App

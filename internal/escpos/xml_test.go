@@ -3,6 +3,7 @@ package escpos
 import (
 	"bytes"
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"epos-proxy/internal/testutil"
@@ -87,6 +88,28 @@ func TestParseXML_CutAndPulse(t *testing.T) {
 	expected = append(expected, CmdCut...)
 	expected = append(expected, CmdPulse...)
 	testutil.ExpectedBytesEqual(t, got, expected)
+}
+
+func TestParseXML_PulseAttributes(t *testing.T) {
+	xml := `<epos-print><pulse drawer="drawer_2" time="pulse_500" /></epos-print>`
+
+	got, err := ParseXML([]byte(xml))
+	testutil.ExpectedNoError(t, err)
+
+	expected := append([]byte(nil), CmdInit...)
+	expected = append(expected,
+		ESC, 0x3D, 0x01,
+		ESC, 0x70, 0x01, 0xFA, 0xFA,
+	)
+	testutil.ExpectedBytesEqual(t, got, expected)
+}
+
+func TestParseXML_PulseRejectsUnsupportedValues(t *testing.T) {
+	_, err := ParseXML([]byte(`<epos-print><pulse drawer="drawer_3" /></epos-print>`))
+	testutil.ExpectedErrorContains(t, err, "pulse element")
+
+	_, err = ParseXML([]byte(`<epos-print><pulse time="pulse_600" /></epos-print>`))
+	testutil.ExpectedErrorContains(t, err, "pulse element")
 }
 
 func TestParseXML_ImageElement(t *testing.T) {
@@ -183,4 +206,27 @@ func TestHelper_Clamp(t *testing.T) {
 	testutil.ExpectedEqual(t, clamp(5, 1, 10), 5)
 	testutil.ExpectedEqual(t, clamp(0, 1, 10), 1)
 	testutil.ExpectedEqual(t, clamp(15, 1, 10), 10)
+}
+
+func TestParseXML_RejectsNestedCommandContent(t *testing.T) {
+	_, err := ParseXML([]byte(`<epos-print><text>safe<text>nested</text></text></epos-print>`))
+	testutil.ExpectedError(t, err)
+	if !strings.Contains(err.Error(), "nested element") {
+		t.Fatalf("expected nested-element error, got: %v", err)
+	}
+}
+
+func TestParseXML_RejectsExcessiveElementCount(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("<epos-print>")
+	for i := 0; i < maxEPOSItems+1; i++ {
+		body.WriteString("<feed line=\"1\"/>")
+	}
+	body.WriteString("</epos-print>")
+
+	_, err := ParseXML([]byte(body.String()))
+	testutil.ExpectedError(t, err)
+	if !strings.Contains(err.Error(), "too many elements") {
+		t.Fatalf("expected item-limit error, got: %v", err)
+	}
 }

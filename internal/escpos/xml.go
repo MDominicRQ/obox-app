@@ -3,37 +3,115 @@ package escpos
 import (
 	"encoding/xml"
 	"fmt"
+	"io"
 	"strings"
 )
 
+const maxEPOSItems = 4096
+
 type xmlRawItem struct {
 	XMLName xml.Name
-	Attrs   []xml.Attr `xml:",any,attr"`
-	Content string     `xml:",chardata"`
+	Attrs   []xml.Attr
+	Content string
 }
 
-type xmlEPOSPrint struct {
-	XMLName xml.Name     `xml:"epos-print"`
-	Items   []xmlRawItem `xml:",any"`
+func readFlatElement(decoder *xml.Decoder, start xml.StartElement) (xmlRawItem, error) {
+	item := xmlRawItem{
+		XMLName: start.Name,
+		Attrs:   append([]xml.Attr(nil), start.Attr...),
+	}
+
+	var text strings.Builder
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return xmlRawItem{}, fmt.Errorf("XML parse error: unexpected end of <%s>", start.Name.Local)
+		}
+		if err != nil {
+			return xmlRawItem{}, fmt.Errorf("XML parse error: %w", err)
+		}
+
+		switch t := token.(type) {
+		case xml.CharData:
+			text.Write([]byte(t))
+		case xml.StartElement:
+			return xmlRawItem{}, fmt.Errorf("nested element <%s> is not supported inside <%s>", t.Name.Local, start.Name.Local)
+		case xml.EndElement:
+			if t.Name != start.Name {
+				return xmlRawItem{}, fmt.Errorf("unexpected closing element </%s>", t.Name.Local)
+			}
+			item.Content = text.String()
+			return item, nil
+		}
+	}
+}
+
+func parseEPOSPrintFragment(fragment string) ([]xmlRawItem, error) {
+	decoder := xml.NewDecoder(strings.NewReader(fragment))
+	decoder.Strict = true
+
+	var rootSeen bool
+	items := make([]xmlRawItem, 0, 16)
+
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("XML parse error: %w", err)
+		}
+
+		switch t := token.(type) {
+		case xml.StartElement:
+			if !rootSeen {
+				if strings.ToLower(t.Name.Local) != "epos-print" {
+					return nil, fmt.Errorf("expected <epos-print> root element")
+				}
+				rootSeen = true
+				continue
+			}
+
+			if len(items) >= maxEPOSItems {
+				return nil, fmt.Errorf("too many elements inside <epos-print>")
+			}
+
+			item, itemErr := readFlatElement(decoder, t)
+			if itemErr != nil {
+				return nil, itemErr
+			}
+			items = append(items, item)
+
+		case xml.EndElement:
+			if rootSeen && strings.ToLower(t.Name.Local) == "epos-print" {
+				return items, nil
+			}
+		}
+	}
+
+	if !rootSeen {
+		return nil, fmt.Errorf("no <epos-print> element found in request body")
+	}
+	return nil, fmt.Errorf("XML parse error: missing </epos-print>")
 }
 
 func ParseXML(body []byte) ([]byte, error) {
 	s := string(body)
 	start := strings.Index(s, "<epos-print")
 	end := strings.LastIndex(s, "</epos-print>")
-	if start == -1 || end == -1 {
+	if start == -1 || end == -1 || end < start {
 		return nil, fmt.Errorf("no <epos-print> element found in request body")
 	}
 	fragment := s[start : end+len("</epos-print>")]
 
-	var ep xmlEPOSPrint
-	if err := xml.Unmarshal([]byte(fragment), &ep); err != nil {
-		return nil, fmt.Errorf("XML parse error: %w", err)
+	items, err := parseEPOSPrintFragment(fragment)
+	if err != nil {
+		return nil, err
 	}
 
 	job := append([]byte(nil), CmdInit...)
 
-	for _, item := range ep.Items {
+	for _, item := range items {
 		tag := strings.ToLower(item.XMLName.Local)
 		attrs := attrMap(item.Attrs)
 
@@ -51,7 +129,14 @@ func ParseXML(body []byte) ([]byte, error) {
 			job = append(job, CmdCut...)
 
 		case "pulse":
-			job = append(job, CmdPulse...)
+			pulseCmd, err := BuildPulse(PulseAttrs{
+				Drawer: attrs["drawer"],
+				Time:   attrs["time"],
+			})
+			if err != nil {
+				return nil, fmt.Errorf("pulse element: %w", err)
+			}
+			job = append(job, pulseCmd...)
 
 		case "image":
 			imgAttrs := ImageAttrs{
