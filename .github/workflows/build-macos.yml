@@ -39,7 +39,7 @@ jobs:
           - arch: arm64
             runner: macos-15
             platform: darwin/arm64
-            artifact: epos-proxy-macos-arm64-macos11plus
+            artifact: epos-proxy-macos-arm64
             go_version: "1.24.13"
             go_mod_version: "1.24.0"
             deployment_target: "11.0"
@@ -49,7 +49,7 @@ jobs:
           - arch: amd64
             runner: macos-15-intel
             platform: darwin/amd64
-            artifact: epos-proxy-macos-intel-catalina10.15plus
+            artifact: epos-proxy-macos-intel
             go_version: "1.22.12"
             go_mod_version: "1.22.0"
             deployment_target: "10.15"
