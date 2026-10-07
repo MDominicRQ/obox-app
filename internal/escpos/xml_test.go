@@ -90,6 +90,28 @@ func TestParseXML_CutAndPulse(t *testing.T) {
 	testutil.ExpectedBytesEqual(t, got, expected)
 }
 
+func TestParseXML_PulseAttributes(t *testing.T) {
+	xml := `<epos-print><pulse drawer="drawer_2" time="pulse_500" /></epos-print>`
+
+	got, err := ParseXML([]byte(xml))
+	testutil.ExpectedNoError(t, err)
+
+	expected := append([]byte(nil), CmdInit...)
+	expected = append(expected,
+		ESC, 0x3D, 0x01,
+		ESC, 0x70, 0x01, 0xFA, 0xFA,
+	)
+	testutil.ExpectedBytesEqual(t, got, expected)
+}
+
+func TestParseXML_PulseRejectsUnsupportedValues(t *testing.T) {
+	_, err := ParseXML([]byte(`<epos-print><pulse drawer="drawer_3" /></epos-print>`))
+	testutil.ExpectedErrorContains(t, err, "pulse element")
+
+	_, err = ParseXML([]byte(`<epos-print><pulse time="pulse_600" /></epos-print>`))
+	testutil.ExpectedErrorContains(t, err, "pulse element")
+}
+
 func TestParseXML_ImageElement(t *testing.T) {
 	bitmap := []byte{0xAA, 0x55}
 	b64 := base64.StdEncoding.EncodeToString(bitmap)
