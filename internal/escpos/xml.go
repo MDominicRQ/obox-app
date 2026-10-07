@@ -129,7 +129,14 @@ func ParseXML(body []byte) ([]byte, error) {
 			job = append(job, CmdCut...)
 
 		case "pulse":
-			job = append(job, CmdPulse...)
+			pulseCmd, err := BuildPulse(PulseAttrs{
+				Drawer: attrs["drawer"],
+				Time:   attrs["time"],
+			})
+			if err != nil {
+				return nil, fmt.Errorf("pulse element: %w", err)
+			}
+			job = append(job, pulseCmd...)
 
 		case "image":
 			imgAttrs := ImageAttrs{
