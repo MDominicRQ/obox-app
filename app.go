@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"epos-proxy/internal/certs"
@@ -597,7 +598,7 @@ func (a *App) EnableAutostart() error {
 	if runtime.GOOS == "darwin" {
 		executable := a.autoStart.Exec[0]
 		if util.MacExecutableIsTranslocated(executable) ||
-			filepath.HasPrefix(executable, "/Volumes/") {
+			strings.HasPrefix(executable, "/Volumes/") {
 			return fmt.Errorf("ePOS Proxy is running from a temporary or mounted location (%s). Move the .app to /Applications, open it there, and enable Auto Start again", executable)
 		}
 		// Rewrite an existing entry too: the old IsEnabled check only looked
