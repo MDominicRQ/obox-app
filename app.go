@@ -105,10 +105,15 @@ type Printers struct {
 func NewApp() *App {
 	a := &App{}
 
+	// argv[0] may be relative; launchd requires a stable absolute path.
+	executable := os.Args[0]
+	if path, err := os.Executable(); err == nil {
+		executable = path
+	}
 	a.autoStart = &autostart.App{
 		Name:        "epos-proxy",
 		DisplayName: "ePOS Proxy",
-		Exec:        []string{os.Args[0], "--background"},
+		Exec:        []string{executable, "--background"},
 	}
 	a.dialogs = runtimeDialogs{}
 
@@ -575,6 +580,10 @@ func (a *App) InstallHTTPSCertificate() error {
 }
 
 func (a *App) IsAutostartEnabled() bool {
+	if runtime.GOOS == "darwin" {
+		// A plist may still exist after the .app has been moved or replaced.
+		return util.MacAutostartEntryMatches(a.autoStart.Name, a.autoStart.Exec)
+	}
 	return a.autoStart.IsEnabled()
 }
 
@@ -585,10 +594,26 @@ func (a *App) EnableAutostart() error {
 		return util.EnableLinuxAutostart()
 	}
 
+	if runtime.GOOS == "darwin" {
+		executable := a.autoStart.Exec[0]
+		if util.MacExecutableIsTranslocated(executable) ||
+			filepath.HasPrefix(executable, "/Volumes/") {
+			return fmt.Errorf("ePOS Proxy is running from a temporary or mounted location (%s). Move the .app to /Applications, open it there, and enable Auto Start again", executable)
+		}
+		// Rewrite an existing entry too: the old IsEnabled check only looked
+		// for a plist and silently retained stale executable paths.
+		if err := a.autoStart.Enable(); err != nil {
+			return fmt.Errorf("write macOS login agent: %w", err)
+		}
+		if !a.IsAutostartEnabled() {
+			return fmt.Errorf("macOS login agent did not contain the expected executable and --background argument")
+		}
+		return nil
+	}
+
 	if !a.autoStart.IsEnabled() {
 		return a.autoStart.Enable()
 	}
-
 	return nil
 }
 
