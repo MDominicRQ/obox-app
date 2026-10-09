@@ -15,7 +15,7 @@ func TestMacAutostartEntryMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	plistPath := filepath.Join(dir, "epos-proxy.plist")
-	executable := "/Applications/ePOS Proxy.app/Contents/MacOS/ePOS Proxy"
+	executable := filepath.Join(home, "Applications", "ePOS Proxy.app", "Contents", "MacOS", "ePOS Proxy")
 	command := []string{executable, "--background"}
 
 	writePlist := func(label, exe, flag string, runAtLoad bool) {
