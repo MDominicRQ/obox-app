@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"runtime"
 
 	"epos-proxy/internal/logger"
@@ -65,19 +66,23 @@ func createMenu(app *App) *menu.Menu {
 
 func handleAutoStartToggle(app *App, cb *menu.CallbackData) {
 	checked := cb.MenuItem.Checked
-
 	logger.Debugf("Auto Start toggled: %v", checked)
 
+	var err error
 	if checked {
-		if err := app.EnableAutostart(); err != nil {
-			logger.Errorf("Failed to enable autostart: %v", err)
-		}
+		err = app.EnableAutostart()
+	} else {
+		err = app.DisableAutostart()
+	}
+	if err != nil {
+		logger.Errorf("Failed to change Auto Start: %v", err)
+		cb.MenuItem.SetChecked(app.IsAutostartEnabled())
+		app.showError("Auto Start", fmt.Sprintf("Unable to change Auto Start: %v", err))
 		return
 	}
 
-	if err := app.DisableAutostart(); err != nil {
-		logger.Errorf("Failed to disable autostart: %v", err)
-	}
+	// Keep the checkbox in sync with the registration on disk.
+	cb.MenuItem.SetChecked(app.IsAutostartEnabled())
 }
 
 func handleNetworkPrintingToggle(app *App, cb *menu.CallbackData) {
