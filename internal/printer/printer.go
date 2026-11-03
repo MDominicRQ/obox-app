@@ -24,7 +24,7 @@ const (
 const (
 	QueueSize    = 100
 	WriteTimeout = 5 * time.Second
-	ChunkSize    = 8 * 1024 // 8 KB
+	ChunkSize    = 64 * 1024 // 8 KB
 )
 
 var (
