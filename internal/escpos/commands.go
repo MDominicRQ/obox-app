@@ -10,7 +10,7 @@ const (
 	GS  byte = 0x1D
 	LF  byte = 0x0A
 
-	maxImgSliceHeight = 255
+	maxImgSliceHeight = 2048
 	maxImageBytes     = 4 * 1024 * 1024
 )
 
