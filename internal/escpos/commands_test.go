@@ -314,7 +314,7 @@ func TestBuildImage_DataHandling(t *testing.T) {
 	}
 	testutil.ExpectedBytesEqual(t, got, expectedPrefix)
 
-	// Image data larger than one slice is split into multiple chunks.
+	// A 300-row image now fits in one raster command.
 	bitmap = make([]byte, 300)
 	for i := range bitmap {
 		bitmap[i] = byte(i % 256)
@@ -323,13 +323,40 @@ func TestBuildImage_DataHandling(t *testing.T) {
 
 	got, err = BuildImage(b64, ImageAttrs{Width: 8, Height: 300})
 	testutil.ExpectedNoError(t, err)
-	testutil.ExpectedLen(t, got, 316)
+	testutil.ExpectedLen(t, got, 8+len(bitmap))
+	testutil.ExpectedBytesEqual(t, got[:8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0x2C, 0x01})
+	testutil.ExpectedBytesEqual(t, got[8:], bitmap)
+}
 
-	// Verify Chunk 1 header
-	testutil.ExpectedBytesEqual(t, got[:8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0xFF, 0x00})
+// Verify that larger images preserve all bytes across raster command boundaries.
+func TestBuildImage_SplitsAtConfiguredHeight(t *testing.T) {
+	const bytesPerRow = 2
+	height := maxImgSliceHeight + 1
+	bitmap := make([]byte, height*bytesPerRow)
+	for i := range bitmap {
+		bitmap[i] = byte(i % 251)
+	}
 
-	// Verify Chunk 2 header (0x2D = 45)
-	testutil.ExpectedBytesEqual(t, got[263:263+8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0x2D, 0x00})
+	got, err := BuildImage(base64.StdEncoding.EncodeToString(bitmap), ImageAttrs{
+		Width:  16,
+		Height: height,
+	})
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedLen(t, got, len(bitmap)+16)
+
+	firstDataEnd := 8 + maxImgSliceHeight*bytesPerRow
+	testutil.ExpectedBytesEqual(t, got[:8], []byte{
+		GS, 0x76, 0x30, 0x00,
+		bytesPerRow, 0x00,
+		byte(maxImgSliceHeight & 0xFF), byte(maxImgSliceHeight >> 8),
+	})
+	testutil.ExpectedBytesEqual(t, got[8:firstDataEnd], bitmap[:maxImgSliceHeight*bytesPerRow])
+	testutil.ExpectedBytesEqual(t, got[firstDataEnd:firstDataEnd+8], []byte{
+		GS, 0x76, 0x30, 0x00,
+		bytesPerRow, 0x00,
+		0x01, 0x00,
+	})
+	testutil.ExpectedBytesEqual(t, got[firstDataEnd+8:], bitmap[maxImgSliceHeight*bytesPerRow:])
 }
 
 func TestBuildImage_RejectsUnsafeDimensions(t *testing.T) {
