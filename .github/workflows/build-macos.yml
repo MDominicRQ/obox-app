@@ -7,11 +7,6 @@ concurrency:
 on:
   workflow_dispatch:
 
-  # Temporary PR validation; remove after the matrix completes.
-  pull_request:
-    branches:
-      - main
-
   push:
     tags:
       - "*"
