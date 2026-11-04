@@ -140,6 +140,81 @@ func TestPrinter_WriteLAN_Success(t *testing.T) {
 	}
 }
 
+// A mock TCP connection that records write sizes and can simulate short
+// successful writes without requiring a physical network printer.
+type recordingLANConn struct {
+	net.Conn
+	received    []byte
+	maxWrite    int
+	largestCall int
+	writes      int
+	deadlines   int
+	closed      bool
+	zeroWrite   bool
+}
+
+func (c *recordingLANConn) Write(b []byte) (int, error) {
+	c.writes++
+	if len(b) > c.largestCall {
+		c.largestCall = len(b)
+	}
+	if c.zeroWrite {
+		return 0, nil
+	}
+	n := len(b)
+	if c.maxWrite > 0 && n > c.maxWrite {
+		n = c.maxWrite
+	}
+	c.received = append(c.received, b[:n]...)
+	return n, nil
+}
+
+func (c *recordingLANConn) SetWriteDeadline(time.Time) error {
+	c.deadlines++
+	return nil
+}
+
+func (c *recordingLANConn) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestPrinter_WriteLAN_LargePayloadAndShortWrites(t *testing.T) {
+	conn := &recordingLANConn{maxWrite: 7 * 1024}
+	p := &Printer{connectionType: ConnKindLAN, lanIP: "127.0.0.1", tcpConn: conn}
+	payload := make([]byte, 2*lanWriteChunkSize+17)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	if err := p.Write(payload); err != nil {
+		t.Fatalf("write LAN payload: %v", err)
+	}
+	testutil.ExpectedBytesEqual(t, conn.received, payload)
+	if conn.largestCall > lanWriteChunkSize {
+		t.Fatalf("LAN write exceeded %d bytes: got %d", lanWriteChunkSize, conn.largestCall)
+	}
+	if conn.writes < 3 || conn.deadlines != conn.writes {
+		t.Fatalf("expected multiple deadline-bound LAN writes: writes=%d deadlines=%d", conn.writes, conn.deadlines)
+	}
+	if conn.closed {
+		t.Fatal("successful LAN writes must not close the connection")
+	}
+}
+
+func TestPrinter_WriteLAN_ZeroLengthWriteClosesConnection(t *testing.T) {
+	conn := &recordingLANConn{zeroWrite: true}
+	p := &Printer{connectionType: ConnKindLAN, lanIP: "127.0.0.1", tcpConn: conn}
+
+	err := p.Write([]byte("print job"))
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("expected io.ErrShortWrite, got %v", err)
+	}
+	if !conn.closed || p.tcpConn != nil {
+		t.Fatal("failed LAN writes must close the connection")
+	}
+}
+
 func TestPrinter_WriteLAN_OfflineFails(t *testing.T) {
 	p := &Printer{connectionType: ConnKindLAN, lanIP: "127.0.0.254"}
 	defer p.close()
