@@ -160,8 +160,9 @@ type ImageAttrs struct {
 }
 
 // BuildImage decodes a base64-encoded 1-bit bitmap and returns the ESC/POS
-// GS v 0 command stream needed to print it. The image is sliced into chunks
-// of at most 255 rows to satisfy the command's yL byte limit.
+// GS v 0 command stream needed to print it. Images are split into raster
+// commands of up to maxImgSliceHeight rows; the height uses both yL and yH.
+// Printer firmware may impose lower model-specific image limits.
 func BuildImage(b64data string, a ImageAttrs) ([]byte, error) {
 	if a.Width <= 0 || a.Height <= 0 {
 		return nil, fmt.Errorf("image dimensions must be positive")
