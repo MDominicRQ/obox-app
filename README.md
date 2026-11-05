@@ -42,11 +42,11 @@ one monochrome `<image>` command. This proxy can transmit those image pixels usi
 Epson buffered graphics (**GS ( L**, function 112 to store, function 50 to print),
 instead of the older **GS v 0** raster command.
 
-- **LAN receipt printers:** Epson buffered graphics is selected by default.
-  The app lists a **LAN receipt image mode** dropdown for each printer. Select
-  **Compatible (GS v 0)** when using another brand or firmware which does not
-  support Epson's GS ( L graphics commands. Mode changes are saved per IP and
-  apply to the next print job without changing the Odoo URL.
+- **LAN receipt printers:** **Compatible (GS v 0)** remains the default.
+  For a verified Epson TM-T88IV/V/VI/VII, select **Epson optimized (GS ( L)**
+  in the app's **LAN receipt image mode** dropdown. The option is stored per
+  printer IP and takes effect on the next ticket without changing the Odoo URL.
+  For unknown models, retain Compatible mode until explicitly validated.
 - **USB printers and raw label printing:** unchanged.
 - The optimized mode divides the image into 192-row graphics chunks (or fewer
   rows when necessary for the 16-bit command length). It does not drop image
