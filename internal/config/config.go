@@ -25,8 +25,9 @@ const (
 type AppConfig struct {
 	Port            int      `json:"port"`
 	HTTPSPort       int      `json:"https_port,omitempty"`
-	LANPrinters     []string `json:"lan_printers,omitempty"`
-	NetworkPrinting bool     `json:"network_printing"`
+	LANPrinters     []string          `json:"lan_printers,omitempty"`
+	LANImageModes   map[string]string `json:"lan_image_modes,omitempty"`
+	NetworkPrinting bool              `json:"network_printing"`
 }
 
 func defaults() AppConfig {
@@ -248,6 +249,7 @@ func (cm *Manager) RemoveLANPrinter(ip string) error {
 	for i, existing := range cm.Data.LANPrinters {
 		if existing == ip {
 			cm.Data.LANPrinters = append(cm.Data.LANPrinters[:i], cm.Data.LANPrinters[i+1:]...)
+			delete(cm.Data.LANImageModes, ip)
 			return cm.saveLocked()
 		}
 	}
@@ -276,4 +278,46 @@ func (cm *Manager) HasLANPrinter(ip string) bool {
 		}
 	}
 	return false
+}
+
+// GetLANPrinterImageMode returns a safe compatible default for existing and
+// unidentified printers. Epson graphics must be explicitly enabled per IP.
+func (cm *Manager) GetLANPrinterImageMode(ip string) string {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if cm.Data.LANImageModes[ip] == "epson_graphics" {
+		return "epson_graphics"
+	}
+	return "legacy"
+}
+
+// SetLANPrinterImageMode persists a printer-specific fallback. The setting is
+// resolved at print time, so existing endpoints do not need to be recreated.
+func (cm *Manager) SetLANPrinterImageMode(ip, mode string) error {
+	if mode != "legacy" && mode != "epson_graphics" {
+		return fmt.Errorf("unsupported LAN printer image mode %q", mode)
+	}
+
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	configured := false
+	for _, existing := range cm.Data.LANPrinters {
+		if existing == ip {
+			configured = true
+			break
+		}
+	}
+	if !configured {
+		return fmt.Errorf("LAN printer %s is not configured", ip)
+	}
+
+	if cm.Data.LANImageModes == nil {
+		cm.Data.LANImageModes = make(map[string]string)
+	}
+	if mode == "epson_graphics" {
+		cm.Data.LANImageModes[ip] = mode
+	} else {
+		delete(cm.Data.LANImageModes, ip)
+	}
+	return cm.saveLocked()
 }

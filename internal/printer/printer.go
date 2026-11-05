@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -24,7 +25,10 @@ const (
 const (
 	QueueSize    = 100
 	WriteTimeout = 5 * time.Second
-	ChunkSize    = 64 * 1024 // 8 KB
+	ChunkSize    = 64 * 1024 // USB transfer size only
+	// Bound each LAN write so slower printer buffers can keep making progress
+	// without imposing a single 5-second deadline on an entire large job.
+	lanWriteChunkSize = 32 * 1024
 )
 
 var (
@@ -116,13 +120,26 @@ func (p *Printer) Write(data []byte) error {
 	logger.Debugf("Writing %d bytes to printer %s", len(data), p.idToString())
 
 	if p.connectionType == ConnKindLAN {
-		if err := p.tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-			p.closeDeviceLocked()
-			return fmt.Errorf("failed to set write deadline for LAN printer %s: %w", p.idToString(), err)
-		}
-		if _, err := p.tcpConn.Write(data); err != nil {
-			p.closeDeviceLocked()
-			return fmt.Errorf("failed to write to LAN printer %s: %w", p.idToString(), err)
+		// TCP is a byte stream: splitting writes does not alter ESC/POS data.
+		// Refresh the deadline for each chunk instead of timing out a large
+		// receipt while a slower printer drains its receive buffer.
+		for len(data) > 0 {
+			size := min(len(data), lanWriteChunkSize)
+			if err := p.tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+				p.closeDeviceLocked()
+				return fmt.Errorf("failed to set write deadline for LAN printer %s: %w", p.idToString(), err)
+			}
+
+			n, err := p.tcpConn.Write(data[:size])
+			if err != nil {
+				p.closeDeviceLocked()
+				return fmt.Errorf("failed to write to LAN printer %s: %w", p.idToString(), err)
+			}
+			if n <= 0 || n > size {
+				p.closeDeviceLocked()
+				return fmt.Errorf("failed to write to LAN printer %s: %w", p.idToString(), io.ErrShortWrite)
+			}
+			data = data[n:]
 		}
 		logger.Debugf("Successfully wrote to LAN printer %s", p.idToString())
 		return nil

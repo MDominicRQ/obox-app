@@ -12,6 +12,7 @@ import (
 
 	"epos-proxy/internal/certs"
 	"epos-proxy/internal/config"
+	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/logger"
 	"epos-proxy/internal/printer"
 	"epos-proxy/internal/server"
@@ -80,6 +81,7 @@ type Printer struct {
 	Id             string `json:"id"`
 	IsLAN          bool   `json:"isLAN"`
 	LANIp          string `json:"lanIp,omitempty"`
+	LANImageMode   string `json:"lanImageMode,omitempty"`
 	Online         bool   `json:"online"`
 	Type           string `json:"type"`
 }
@@ -130,6 +132,7 @@ func NewApp() *App {
 func (a *App) proxyAccessPolicy() server.AccessPolicy {
 	return server.AccessPolicy{
 		NetworkPrintingEnabled: a.config.IsNetworkPrintingEnabled,
+		LANImageMode: a.config.GetLANPrinterImageMode,
 	}
 }
 
@@ -315,6 +318,7 @@ func (a *App) Printers() Printers {
 			NetworkHTTPSIp: a.GetPrinterNetworkHTTPSUrl(info.Id),
 			IsLAN:          true,
 			LANIp:          info.IP,
+			LANImageMode:   a.config.GetLANPrinterImageMode(info.IP),
 			Type:           string(printer.TypeReceipt),
 		})
 	}
@@ -368,6 +372,19 @@ func (a *App) ConfirmRemoveLANPrinter(ip string) (bool, error) {
 	}
 	logger.Infof("Remove LAN printer cancelled, Remove printer dialog result: %s", result)
 	return false, nil
+}
+
+// SetLANPrinterImageMode switches a network receipt printer between modern
+// Epson buffered graphics and the broadly compatible legacy raster command.
+func (a *App) SetLANPrinterImageMode(ip, mode string) error {
+	validatedIP, err := printer.ValidateIPAddress(ip)
+	if err != nil {
+		return err
+	}
+	if mode != string(escpos.ImageModeLegacy) && mode != string(escpos.ImageModeEpsonGraphics) {
+		return fmt.Errorf("unsupported image mode %q", mode)
+	}
+	return a.config.SetLANPrinterImageMode(validatedIP, mode)
 }
 
 func (a *App) CheckLANPrinterStatus(ip string) bool {

@@ -1,9 +1,10 @@
-import { useContext, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import { ToastContext } from "../contexts/ToastContext";
 import { main } from "../../wailsjs/go/models";
 import { errorText } from "../error";
 import { executePrint } from "../functions/executePrint";
 import { copyText } from "../functions/copyText";
+import { SetLANPrinterImageMode } from "../../wailsjs/go/main/App";
 
 interface PrinterActionsProps {
   printer: main.Printer;
@@ -15,7 +16,14 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
     "http" | "https" | "lan-http" | "lan-https" | null
   >(null);
   const [isTestPrinting, setIsTestPrinting] = useState(false);
+  const [isGraphicsTesting, setIsGraphicsTesting] = useState(false);
   const [isCashDrawerOpening, setIsCashDrawerOpening] = useState(false);
+  const [imageMode, setImageMode] = useState(printer.lanImageMode || "legacy");
+  const [savingImageMode, setSavingImageMode] = useState(false);
+
+  useEffect(() => {
+    setImageMode(printer.lanImageMode || "legacy");
+  }, [printer.lanImageMode]);
   const httpsIp = printer.httpsIp;
   const networkIp = printer.networkIp;
   const networkHttpsIp = printer.networkHttpsIp;
@@ -54,6 +62,21 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
     }
   }
 
+  async function onGraphicsTest() {
+    setIsGraphicsTesting(true);
+    try {
+      await executePrint(printer, false, true);
+      toastContext.actions.showToast(
+        `Graphics test sent to ${printer.name}. Check that the lines printed correctly.`,
+        "success",
+      );
+    } catch (err) {
+      toastContext.actions.showToast(errorText(err, "Graphics test failed"), "danger");
+    } finally {
+      setIsGraphicsTesting(false);
+    }
+  }
+
   async function onCashDrawerOpen() {
     setIsCashDrawerOpening(true);
     try {
@@ -72,7 +95,26 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
     }
   }
 
+  async function changeImageMode(nextMode: string) {
+    if (!printer.isLAN || !printer.lanIp) {
+      return;
+    }
+    const previous = imageMode;
+    setImageMode(nextMode);
+    setSavingImageMode(true);
+    try {
+      await SetLANPrinterImageMode(printer.lanIp, nextMode);
+      toastContext.actions.showToast("LAN image mode saved for " + printer.name, "success");
+    } catch (err) {
+      setImageMode(previous);
+      toastContext.actions.showToast(errorText(err, "Unable to save image mode"), "danger");
+    } finally {
+      setSavingImageMode(false);
+    }
+  }
+
   return (
+    <>
     <div className="flex gap-2 mt-4 flex-wrap">
       <button
         onClick={() => onCopy(printer.ip, "http")}
@@ -132,6 +174,16 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
         {isTestPrinting ? "Printing..." : "Test"}
       </button>
 
+      {printer.isLAN && printer.type === "receipt" && (
+        <button
+          onClick={onGraphicsTest}
+          disabled={isGraphicsTesting}
+          className="flex-1 border rounded-lg text-sm px-3 py-2 cursor-pointer border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+        >
+          {isGraphicsTesting ? "Printing image..." : "Test graphics"}
+        </button>
+      )}
+
       {printer.type === "receipt" && (
         <button
           onClick={onCashDrawerOpen}
@@ -142,5 +194,27 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
         </button>
       )}
     </div>
+    {printer.isLAN && printer.lanIp && printer.type === "receipt" && (
+      <div className="mt-3 text-sm">
+        <label className="block text-gray-700 font-medium" htmlFor={`image-mode-${printer.id}`}>
+          LAN receipt image mode
+        </label>
+        <select
+          id={`image-mode-${printer.id}`}
+          value={imageMode}
+          disabled={savingImageMode}
+          onChange={(event) => void changeImageMode(event.target.value)}
+          className="mt-1 block w-full border border-gray-300 rounded-lg p-2 bg-white text-gray-800 disabled:opacity-50"
+        >
+          <option value="epson_graphics">Epson optimized (GS ( L) — TM-T88IV/V/VI/VII</option>
+          <option value="legacy">Compatible (GS v 0) — fallback for other models</option>
+        </select>
+        <p className="mt-1 text-xs text-gray-500">
+          Compatible is the safe default. Enable Epson optimized only for a verified
+          TM-T88 model, and compare a real Odoo receipt. Changes affect new tickets.
+        </p>
+      </div>
+    )}
+    </>
   );
 }
