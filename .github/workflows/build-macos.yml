@@ -7,6 +7,11 @@ concurrency:
 on:
   workflow_dispatch:
 
+  # Validate the experimental CUPS backend on macOS for this draft PR.
+  pull_request:
+    branches:
+      - main
+
   push:
     tags:
       - "*"
