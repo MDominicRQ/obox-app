@@ -333,3 +333,29 @@ func TestManager_LANPrinterImageModesPersistAndFallback(t *testing.T) {
 		t.Fatal("removed printer must not retain old graphics configuration")
 	}
 }
+
+func TestManager_CUPSQueuePerPrinterAndCleanup(t *testing.T) {
+	cm := &Manager{path: filepath.Join(t.TempDir(), "config.json"), Data: defaults()}
+	testutil.ExpectedNoError(t, cm.AddLanEposPrinter("192.168.12.33"))
+
+	if err := cm.SetLANPrinterCUPSQueue("192.168.12.99", "TMTIENDA"); err == nil {
+		t.Fatal("queue must not be set on an unconfigured printer")
+	}
+	if err := cm.SetLANPrinterCUPSQueue("192.168.12.33", ""); err == nil {
+		t.Fatal("empty queue is not valid")
+	}
+
+	testutil.ExpectedNoError(t, cm.SetLANPrinterCUPSQueue("192.168.12.33", "TMTIENDA"))
+	testutil.ExpectedEqual(t, cm.GetLANPrinterCUPSQueue("192.168.12.33"), "TMTIENDA")
+	testutil.ExpectedEqual(t, cm.GetLANPrinterImageMode("192.168.12.33"), "cups_driver")
+
+	reloaded := &Manager{path: cm.Path(), Data: defaults()}
+	testutil.ExpectedNoError(t, reloaded.Load())
+	testutil.ExpectedEqual(t, reloaded.GetLANPrinterCUPSQueue("192.168.12.33"), "TMTIENDA")
+	testutil.ExpectedEqual(t, reloaded.GetLANPrinterImageMode("192.168.12.33"), "cups_driver")
+
+	testutil.ExpectedNoError(t, reloaded.SetLANPrinterImageMode("192.168.12.33", "legacy"))
+	testutil.ExpectedEqual(t, reloaded.GetLANPrinterImageMode("192.168.12.33"), "legacy")
+	testutil.ExpectedNoError(t, reloaded.RemoveLANPrinter("192.168.12.33"))
+	testutil.ExpectedEqual(t, reloaded.GetLANPrinterCUPSQueue("192.168.12.33"), "")
+}
