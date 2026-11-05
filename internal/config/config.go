@@ -280,16 +280,15 @@ func (cm *Manager) HasLANPrinter(ip string) bool {
 	return false
 }
 
-// GetLANPrinterImageMode returns the per-printer graphics setting. Epson TM
-// receipt printers use the buffered graphics path by default; a legacy mode
-// is available for incompatible ESC/POS firmware.
+// GetLANPrinterImageMode returns a safe compatible default for existing and
+// unidentified printers. Epson graphics must be explicitly enabled per IP.
 func (cm *Manager) GetLANPrinterImageMode(ip string) string {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
-	if cm.Data.LANImageModes[ip] == "legacy" {
-		return "legacy"
+	if cm.Data.LANImageModes[ip] == "epson_graphics" {
+		return "epson_graphics"
 	}
-	return "epson_graphics"
+	return "legacy"
 }
 
 // SetLANPrinterImageMode persists a printer-specific fallback. The setting is
@@ -315,7 +314,7 @@ func (cm *Manager) SetLANPrinterImageMode(ip, mode string) error {
 	if cm.Data.LANImageModes == nil {
 		cm.Data.LANImageModes = make(map[string]string)
 	}
-	if mode == "legacy" {
+	if mode == "epson_graphics" {
 		cm.Data.LANImageModes[ip] = mode
 	} else {
 		delete(cm.Data.LANImageModes, ip)
