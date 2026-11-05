@@ -484,3 +484,50 @@ func TestResolveImageMode_OnlyConfiguredLANPrintersUseEpson(t *testing.T) {
 	testutil.ExpectedEqual(t, resolveImageMode("", policy), escpos.ImageModeLegacy)
 	testutil.ExpectedEqual(t, resolveImageMode("USB-not-LAN", policy), escpos.ImageModeLegacy)
 }
+
+func TestPrintData_CUPSModeDrawerStillUsesDirectESCPOS(t *testing.T) {
+	_, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
+		defer conn.Close()
+		data := make([]byte, 256)
+		_, _ = conn.Read(data)
+	})
+	testutil.ExpectedNoError(t, err)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr, AccessPolicy{
+		LANImageMode: func(string) string { return "cups_driver" },
+		LANCUPSQueue: func(string) string { return "TMTIENDA" },
+	})
+	defer s.Stop()
+
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	url := fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id)
+	req := httptest.NewRequest(http.MethodPost, url,
+		bytes.NewBufferString(`<epos-print><pulse /></epos-print>`))
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	data, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(data), `success="true"`)
+}
+
+func TestPrintData_CUPSModeWithoutQueueRefusesImage(t *testing.T) {
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr, AccessPolicy{
+		LANImageMode: func(string) string { return "cups_driver" },
+	})
+	defer s.Stop()
+
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	url := fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id)
+	req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString(
+		`<epos-print><image width="8" height="1">AA==</image><cut /></epos-print>`))
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	data, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(data), `success="false"`)
+	testutil.ExpectedContains(t, string(data), `code="EX_BADPORT"`)
+}
