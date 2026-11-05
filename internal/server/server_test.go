@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"epos-proxy/internal/certs"
+	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/printer"
 	"epos-proxy/internal/testutil"
 )
@@ -466,4 +467,20 @@ func TestPrintData_InvalidImageDimensions_ReturnsSchemaError(t *testing.T) {
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedContains(t, string(body), `success="false"`)
 	testutil.ExpectedContains(t, string(body), `code="SchemaError"`)
+}
+
+func TestResolveImageMode_OnlyConfiguredLANPrintersUseEpson(t *testing.T) {
+	lanPrinter := printer.EncodeLANPrinterID("192.168.1.55")
+	policy := AccessPolicy{
+		LANImageMode: func(ip string) string {
+			if ip == "192.168.1.55" {
+				return string(escpos.ImageModeEpsonGraphics)
+			}
+			return string(escpos.ImageModeLegacy)
+		},
+	}
+	testutil.ExpectedEqual(t, resolveImageMode(lanPrinter, policy), escpos.ImageModeEpsonGraphics)
+	testutil.ExpectedEqual(t, resolveImageMode(lanPrinter, AccessPolicy{}), escpos.ImageModeLegacy)
+	testutil.ExpectedEqual(t, resolveImageMode("", policy), escpos.ImageModeLegacy)
+	testutil.ExpectedEqual(t, resolveImageMode("USB-not-LAN", policy), escpos.ImageModeLegacy)
 }
