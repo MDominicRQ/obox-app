@@ -17,11 +17,11 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
   >(null);
   const [isTestPrinting, setIsTestPrinting] = useState(false);
   const [isCashDrawerOpening, setIsCashDrawerOpening] = useState(false);
-  const [imageMode, setImageMode] = useState(printer.lanImageMode || "epson_graphics");
+  const [imageMode, setImageMode] = useState(printer.lanImageMode || "legacy");
   const [savingImageMode, setSavingImageMode] = useState(false);
 
   useEffect(() => {
-    setImageMode(printer.lanImageMode || "epson_graphics");
+    setImageMode(printer.lanImageMode || "legacy");
   }, [printer.lanImageMode]);
   const httpsIp = printer.httpsIp;
   const networkIp = printer.networkIp;
@@ -184,8 +184,8 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
           <option value="legacy">Compatible (GS v 0) — fallback for other models</option>
         </select>
         <p className="mt-1 text-xs text-gray-500">
-          Changes affect new tickets immediately. Use Compatible if the printer is not an
-          Epson TM model or graphics do not print correctly.
+          Compatible is the safe default. Enable Epson optimized only for a verified
+          TM-T88 model, and compare a real Odoo receipt. Changes affect new tickets.
         </p>
       </div>
     )}
