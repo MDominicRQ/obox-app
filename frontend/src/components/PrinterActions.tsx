@@ -4,7 +4,12 @@ import { main } from "../../wailsjs/go/models";
 import { errorText } from "../error";
 import { executePrint } from "../functions/executePrint";
 import { copyText } from "../functions/copyText";
-import { SetLANPrinterImageMode } from "../../wailsjs/go/main/App";
+import {
+  SetLANPrinterImageMode,
+  SetLANPrinterCUPSQueue,
+  ListLANPrinterCUPSQueues,
+} from "../../wailsjs/go/main/App";
+import { AppContext } from "../contexts/AppContext";
 
 interface PrinterActionsProps {
   printer: main.Printer;
@@ -12,6 +17,7 @@ interface PrinterActionsProps {
 
 export default function PrinterActions({ printer }: PrinterActionsProps) {
   const toastContext = useContext(ToastContext);
+  const isMac = useContext(AppContext).data.isMac;
   const [copiedTarget, setCopiedTarget] = useState<
     "http" | "https" | "lan-http" | "lan-https" | null
   >(null);
@@ -20,10 +26,39 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
   const [isCashDrawerOpening, setIsCashDrawerOpening] = useState(false);
   const [imageMode, setImageMode] = useState(printer.lanImageMode || "legacy");
   const [savingImageMode, setSavingImageMode] = useState(false);
+  const [cupsQueues, setCupsQueues] = useState<string[]>([]);
+  const [cupsQueue, setCupsQueue] = useState(printer.lanCupsQueue || "");
+  const [cupsQueueError, setCupsQueueError] = useState<string | null>(null);
 
   useEffect(() => {
     setImageMode(printer.lanImageMode || "legacy");
   }, [printer.lanImageMode]);
+
+  useEffect(() => {
+    setCupsQueue(printer.lanCupsQueue || "");
+  }, [printer.lanCupsQueue]);
+
+  useEffect(() => {
+    if (!isMac || !printer.isLAN || !printer.lanIp) {
+      return;
+    }
+    let cancelled = false;
+    const ip = printer.lanIp;
+    ListLANPrinterCUPSQueues(ip)
+      .then((found) => {
+        if (!cancelled) {
+          setCupsQueues(found || []);
+          setCupsQueue((existing) => existing || found?.[0] || "");
+          setCupsQueueError(null);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setCupsQueueError(errorText(err, "Unable to detect local Epson CUPS queues"));
+        }
+      });
+    return () => { cancelled = true; };
+  }, [isMac, printer.isLAN, printer.lanIp]);
   const httpsIp = printer.httpsIp;
   const networkIp = printer.networkIp;
   const networkHttpsIp = printer.networkHttpsIp;
@@ -103,11 +138,45 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
     setImageMode(nextMode);
     setSavingImageMode(true);
     try {
-      await SetLANPrinterImageMode(printer.lanIp, nextMode);
-      toastContext.actions.showToast("LAN image mode saved for " + printer.name, "success");
+      if (nextMode === "cups_driver") {
+        if (!isMac) {
+          throw new Error("The system driver mode is available on macOS only.");
+        }
+        const queue = cupsQueue || cupsQueues[0];
+        if (!queue || !cupsQueues.includes(queue)) {
+          throw new Error("No Epson CUPS queue pointing to this printer IP was found.");
+        }
+        await SetLANPrinterCUPSQueue(printer.lanIp, queue);
+        setCupsQueue(queue);
+      } else {
+        await SetLANPrinterImageMode(printer.lanIp, nextMode);
+      }
+      toastContext.actions.showToast("LAN printing mode saved for " + printer.name, "success");
     } catch (err) {
       setImageMode(previous);
       toastContext.actions.showToast(errorText(err, "Unable to save image mode"), "danger");
+    } finally {
+      setSavingImageMode(false);
+    }
+  }
+
+  async function changeCupsQueue(nextQueue: string) {
+    if (!printer.lanIp || !cupsQueues.includes(nextQueue)) {
+      return;
+    }
+    if (imageMode !== "cups_driver") {
+      setCupsQueue(nextQueue);
+      return;
+    }
+    const previous = cupsQueue;
+    setSavingImageMode(true);
+    try {
+      await SetLANPrinterCUPSQueue(printer.lanIp, nextQueue);
+      setCupsQueue(nextQueue);
+      toastContext.actions.showToast("Epson CUPS queue updated", "success");
+    } catch (err) {
+      setCupsQueue(previous);
+      toastContext.actions.showToast(errorText(err, "CUPS queue update failed"), "danger");
     } finally {
       setSavingImageMode(false);
     }
@@ -208,10 +277,40 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
         >
           <option value="epson_graphics">Epson optimized (GS ( L) — TM-T88IV/V/VI/VII</option>
           <option value="legacy">Compatible (GS v 0) — fallback for other models</option>
+          {isMac && (
+            <option value="cups_driver" disabled={cupsQueues.length === 0}>
+              Epson system driver (macOS CUPS)
+            </option>
+          )}
         </select>
+        {isMac && cupsQueues.length > 0 && (
+          <>
+            <label className="mt-3 block text-xs text-gray-700" htmlFor={`cups-queue-${printer.id}`}>
+              Local Epson CUPS queue for this printer IP
+            </label>
+            <select
+              id={`cups-queue-${printer.id}`}
+              value={cupsQueue}
+              disabled={savingImageMode}
+              onChange={(event) => void changeCupsQueue(event.target.value)}
+              className="mt-1 block w-full border border-gray-300 rounded-lg p-2 bg-white text-gray-800 disabled:opacity-50"
+            >
+              {cupsQueues.map((queue) => (
+                <option key={queue} value={queue}>{queue}</option>
+              ))}
+            </select>
+          </>
+        )}
+        {isMac && cupsQueues.length === 0 && (
+          <p className="mt-1 text-xs text-amber-700">
+            No matching local socket://IP:9100 Epson CUPS queue detected.
+          </p>
+        )}
+        {cupsQueueError && <p className="mt-1 text-xs text-red-600">{cupsQueueError}</p>}
         <p className="mt-1 text-xs text-gray-500">
-          Compatible is the safe default. Enable Epson optimized only for a verified
-          TM-T88 model, and compare a real Odoo receipt. Changes affect new tickets.
+          Compatible is the safe default. CUPS uses the local Epson driver for standard
+          Odoo image receipts; drawer pulses and other commands remain direct ESC/POS.
+          Test one complete receipt before enabling more printers.
         </p>
       </div>
     )}
