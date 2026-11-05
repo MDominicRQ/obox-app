@@ -14,6 +14,7 @@ type CUPSImage struct {
 	Width  int
 	Height int
 	Bitmap []byte
+	Cut    bool
 }
 
 // ExtractCUPSImage returns (nil, nil) for XML requests that are not the
@@ -30,6 +31,7 @@ func ExtractCUPSImage(body []byte) (*CUPSImage, error) {
 		return nil, err
 	}
 	var img *xmlRawItem
+	cut := false
 	for i := range items {
 		switch strings.ToLower(items[i].XMLName.Local) {
 		case "image":
@@ -38,7 +40,7 @@ func ExtractCUPSImage(body []byte) (*CUPSImage, error) {
 			}
 			img = &items[i]
 		case "cut":
-			// Cut is reproduced by the Epson CUPS driver.
+			cut = true // Reproduced by the Epson CUPS driver.
 		default:
 			return nil, nil
 		}
@@ -70,5 +72,5 @@ func ExtractCUPSImage(body []byte) (*CUPSImage, error) {
 	if len(raw) < expected {
 		return nil, fmt.Errorf("CUPS image too short: expected %d, got %d", expected, len(raw))
 	}
-	return &CUPSImage{Width: w, Height: h, Bitmap: raw[:expected]}, nil
+	return &CUPSImage{Width: w, Height: h, Bitmap: raw[:expected], Cut: cut}, nil
 }
