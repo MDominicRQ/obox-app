@@ -405,16 +405,16 @@ func TestBuildImage_EpsonGraphicsAcrossSlices(t *testing.T) {
 	got, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(bitmap),
 		ImageAttrs{Width: 8, Height: rows}, ImageModeEpsonGraphics)
 	testutil.ExpectedNoError(t, err)
-	testutil.ExpectedLen(t, got, len(bitmap)+2*(15+8))
+	testutil.ExpectedLen(t, got, len(bitmap)+2*(15+7))
 
 	expectedFirst := []byte{GS, 0x28, 0x4C, 0xCA, 0x00,
 		0x30, 0x70, 0x30, 0x01, 0x01, 0x31, 0x08, 0x00, 0xC0, 0x00}
 	testutil.ExpectedBytesEqual(t, got[:15], expectedFirst)
 	firstEnd := 15 + epsonGraphicsSliceHeight
 	testutil.ExpectedBytesEqual(t, got[15:firstEnd], bitmap[:epsonGraphicsSliceHeight])
-	testutil.ExpectedBytesEqual(t, got[firstEnd:firstEnd+8],
+	testutil.ExpectedBytesEqual(t, got[firstEnd:firstEnd+7],
 		[]byte{GS, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32})
-	second := firstEnd + 8
+	second := firstEnd + 7
 	testutil.ExpectedBytesEqual(t, got[second:second+15], []byte{
 		GS, 0x28, 0x4C, 0x0B, 0x00, 0x30, 0x70, 0x30, 0x01,
 		0x01, 0x31, 0x08, 0x00, 0x01, 0x00,
@@ -438,8 +438,8 @@ func TestBuildImage_EpsonGraphicsPayloadSizeLimit(t *testing.T) {
 
 	const firstRows = 8 // floor((65535 - 10) / (width / 8))
 	const firstData = firstRows * (width / 8)
-	second := 15 + firstData + 8
-	testutil.ExpectedLen(t, got, len(raw)+2*(15+8))
+	second := 15 + firstData + 7
+	testutil.ExpectedLen(t, got, len(raw)+2*(15+7))
 	firstPayloadSize := int(got[3]) | int(got[4])<<8
 	if firstPayloadSize != firstData+10 || firstPayloadSize > 65535 {
 		t.Fatalf("invalid first GS ( L payload size %d", firstPayloadSize)
