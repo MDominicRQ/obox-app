@@ -72,3 +72,46 @@ network acceptance, not that the printer understood or printed the graphics.
 For an unknown model use Compatible mode until GS ( L has been tested. Do not
 send an automatic duplicate raster fallback after a successful TCP write:
 it may print the same ticket twice.
+
+
+### Experimental macOS Epson CUPS mode for slow Odoo receipts
+
+When an Epson TM-T88IV prints the same receipt faster through the installed
+macOS driver than via direct ESC/POS TCP/9100, obox-app can now try that
+existing driver **without changing the Odoo URL or LAN printer IP**.
+
+1. The Epson CUPS printer queue must already be installed on the Mac and
+   configured with a `socket://PRINTER_IP:9100` device URI. Check with
+   `lpstat -v` and `lpoptions -p QUEUE -l`. This integration does **not**
+   install a driver or create a printer queue.
+2. For the configured LAN receipt printer, choose **Epson system driver
+   (macOS CUPS)**. The app lists only queues whose socket IP matches that
+   printer, preventing accidental routing to another store. The choice is
+   stored for this printer IP; the safe default remains **Compatible**.
+3. Print a full Odoo test receipt and verify physical speed, correct paper
+   length (particularly receipts longer than 297 mm), QR/barcode fidelity,
+   cut and cash-drawer behavior. Return to **Compatible** immediately if
+   anything differs.
+
+Implementation: For a standard Odoo `<epos-print><image>...<cut/></epos-print>`
+job the original 1-bit bitmap is reproduced in a 1-bit PNG. The PNG is
+submitted to the selected local Epson queue using `lp`, *without* `-o raw`,
+with `TmtSpeed=Auto`, `TmtPaperReduction=Both`, `TmtPaperSource=DocFeedCut`
+and disabled driver drawer pulses. Bitmap-only images without cut use
+`DocFeedNoCut`. Odoo sends a cash-drawer `<pulse/>` separately; this
+remains a direct ESC/POS operation. Other XML jobs that cannot safely be
+rendered as one raster receipt stay on the direct ESC/POS path.
+
+For images taller than approximately 287 mm, the integration requests a
+custom 80 mm roll-paper length. Epson drivers vary in their supported
+custom page sizes; some may reject or rescale such jobs. **Do not roll out
+to every store before validating real long receipts.**
+
+`lp` acknowledging a job means **CUPS accepted it**, not that a physical
+receipt was completed. A CUPS failure is returned to Odoo without an
+automatic ESC/POS retry, to avoid duplicate customer receipts. Temporary
+ticket PNGs have OS-private permissions and are deleted after submission.
+The system driver mode is macOS-only; other platforms remain unchanged.
+
+Official CUPS media selection:
+https://www.cups.org/doc/options.html
