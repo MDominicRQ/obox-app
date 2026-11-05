@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"epos-proxy/internal/escpos"
+	"epos-proxy/internal/cups"
 	"epos-proxy/internal/logger"
 	"epos-proxy/internal/printer"
 )
@@ -41,6 +42,7 @@ type EPOSResponse struct {
 type AccessPolicy struct {
 	NetworkPrintingEnabled func() bool
 	LANImageMode           func(string) string
+	LANCUPSQueue           func(string) string
 }
 
 func (p AccessPolicy) remoteAllowed() bool {
@@ -364,6 +366,44 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 	}
 
 	mode := resolveImageMode(printerID, policy)
+
+	// Experimental macOS path: the same Epson CUPS driver that printed the
+	// user's comparison image quickly receives the original 1-bit Odoo image.
+	// Any non-image XML (notably <pulse/>) continues through direct ESC/POS.
+	if mode == escpos.ImageMode("cups_driver") {
+		parseStarted := time.Now()
+		img, imageErr := escpos.ExtractCUPSImage(body)
+		if imageErr != nil {
+			logger.Errorf("CUPS image parsing failed: %v", imageErr)
+			writeEPOSResponse(w, EPOSResponse{Success: false, Code: "SchemaError"})
+			return
+		}
+		if img != nil {
+			ip, ok := printer.DecodeLANPrinterID(printerID)
+			if !ok || policy.LANCUPSQueue == nil || policy.LANCUPSQueue(ip) == "" {
+				logger.Errorf("CUPS queue not configured for printer %s", printerID)
+				writeEPOSResponse(w, EPOSResponse{Success: false, Code: "EX_BADPORT"})
+				return
+			}
+			queue := policy.LANCUPSQueue(ip)
+			parseElapsed := time.Since(parseStarted)
+			printStarted := time.Now()
+			pngSize, err := cups.Submit(r.Context(), ip, queue, img)
+			logger.Infof("Print timing printer=%s imageMode=cups_driver queue=%s xmlBytes=%d pngBytes=%d width=%d height=%d parse=%s cupsSubmit=%s",
+				printerID, queue, len(body), pngSize, img.Width, img.Height, parseElapsed, time.Since(printStarted))
+			if err != nil {
+				// Never resend via ESC/POS: CUPS could already have queued the
+				// job, and an automatic fallback can duplicate sale receipts.
+				logger.Errorf("CUPS submission failed for printer %s: %v", printerID, err)
+				writeEPOSResponse(w, EPOSResponse{Success: false, Code: "EX_BADPORT"})
+				return
+			}
+			writeEPOSResponse(w, EPOSResponse{Success: true})
+			return
+		}
+		mode = escpos.ImageModeLegacy
+	}
+
 	parseStarted := time.Now()
 	jobData, err := escpos.ParseXMLWithMode(body, mode)
 	parseElapsed := time.Since(parseStarted)
