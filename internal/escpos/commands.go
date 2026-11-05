@@ -12,6 +12,18 @@ const (
 
 	maxImgSliceHeight = 2048
 	maxImageBytes     = 4 * 1024 * 1024
+
+	// Epson recommends roughly 59-246 raster rows per graphics transfer
+	// for good throughput. Keep every GS ( L payload below its 16-bit size.
+	epsonGraphicsSliceHeight = 192
+	epsonGraphicsMaxDataBytes = 65535 - 10
+)
+
+type ImageMode string
+
+const (
+	ImageModeLegacy        ImageMode = "legacy"
+	ImageModeEpsonGraphics ImageMode = "epson_graphics"
 )
 
 var (
@@ -160,9 +172,20 @@ type ImageAttrs struct {
 }
 
 // BuildImage decodes a base64-encoded 1-bit bitmap and returns the ESC/POS
-// GS v 0 command stream needed to print it. The image is sliced into chunks
-// of at most 255 rows to satisfy the command's yL byte limit.
+// GS v 0 command stream needed to print it. Images are split into raster
+// commands of up to maxImgSliceHeight rows; the height uses both yL and yH.
+// Printer firmware may impose lower model-specific image limits.
 func BuildImage(b64data string, a ImageAttrs) ([]byte, error) {
+	return BuildImageWithMode(b64data, a, ImageModeLegacy)
+}
+
+// BuildImageWithMode preserves the exact 1-bit bitmap in both modes. The Epson
+// graphics path uses GS ( L function 112 (store) followed by function 50 (print)
+// for compatible Epson TM printers; legacy GS v 0 is kept for other devices.
+func BuildImageWithMode(b64data string, a ImageAttrs, mode ImageMode) ([]byte, error) {
+	if mode != ImageModeLegacy && mode != ImageModeEpsonGraphics {
+		return nil, fmt.Errorf("unsupported image mode %q", mode)
+	}
 	if a.Width <= 0 || a.Height <= 0 {
 		return nil, fmt.Errorf("image dimensions must be positive")
 	}
@@ -171,7 +194,10 @@ func BuildImage(b64data string, a ImageAttrs) ([]byte, error) {
 	}
 
 	bytesPerRow := (a.Width + 7) / 8
-	if bytesPerRow <= 0 || a.Height > maxImageBytes/bytesPerRow {
+	if bytesPerRow <= 0 || bytesPerRow > 65535 || a.Height > maxImageBytes/bytesPerRow {
+		return nil, fmt.Errorf("image dimensions exceed ESC/POS limits")
+	}
+	if mode == ImageModeEpsonGraphics && (a.Width > 65535 || bytesPerRow > epsonGraphicsMaxDataBytes) {
 		return nil, fmt.Errorf("image dimensions exceed safe limits")
 	}
 	expectedLen := bytesPerRow * a.Height
@@ -206,18 +232,34 @@ func BuildImage(b64data string, a ImageAttrs) ([]byte, error) {
 
 	}
 
-	// GS v 0 (normal density): GS 0x76 0x30 0x00 xL xH yL yH <data>
-	xL := byte(bytesPerRow & 0xFF)
-	xH := byte((bytesPerRow >> 8) & 0xFF)
+	if mode == ImageModeEpsonGraphics {
+		maxRows := min(epsonGraphicsSliceHeight, epsonGraphicsMaxDataBytes/bytesPerRow)
+		for top := 0; top < a.Height; top += maxRows {
+			h := min(a.Height-top, maxRows)
+			start := top * bytesPerRow
+			size := h*bytesPerRow + 10 // m, fn, a, bx, by, c, xL/xH, yL/yH
 
-	for top := 0; top < a.Height; top += maxImgSliceHeight {
-		h := min(a.Height-top, maxImgSliceHeight)
-		yL := byte(h & 0xFF)
-		yH := byte((h >> 8) & 0xFF)
-		start := top * bytesPerRow
-		b = append(b, GS, 0x76, 0x30, 0x00, xL, xH, yL, yH)
-		b = append(b, raw[start:start+h*bytesPerRow]...)
+			// GS ( L fn=112: store monochrome 1:1 graphics in print buffer.
+			b = append(b, GS, 0x28, 0x4C,
+				byte(size), byte(size>>8), 0x30, 0x70, 0x30,
+				0x01, 0x01, 0x31,
+				byte(a.Width), byte(a.Width>>8), byte(h), byte(h>>8))
+			b = append(b, raw[start:start+h*bytesPerRow]...)
+
+			// GS ( L fn=50: print stored graphics and advance to next line.
+			b = append(b, GS, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32)
+		}
+		return b, nil
 	}
 
+	// Legacy GS v 0 raster stream for ESC/POS-compatible printers.
+	xL := byte(bytesPerRow)
+	xH := byte(bytesPerRow >> 8)
+	for top := 0; top < a.Height; top += maxImgSliceHeight {
+		h := min(a.Height-top, maxImgSliceHeight)
+		start := top * bytesPerRow
+		b = append(b, GS, 0x76, 0x30, 0x00, xL, xH, byte(h), byte(h>>8))
+		b = append(b, raw[start:start+h*bytesPerRow]...)
+	}
 	return b, nil
 }

@@ -314,7 +314,7 @@ func TestBuildImage_DataHandling(t *testing.T) {
 	}
 	testutil.ExpectedBytesEqual(t, got, expectedPrefix)
 
-	// Image data larger than one slice is split into multiple chunks.
+	// A 300-row image now fits in one raster command.
 	bitmap = make([]byte, 300)
 	for i := range bitmap {
 		bitmap[i] = byte(i % 256)
@@ -323,13 +323,40 @@ func TestBuildImage_DataHandling(t *testing.T) {
 
 	got, err = BuildImage(b64, ImageAttrs{Width: 8, Height: 300})
 	testutil.ExpectedNoError(t, err)
-	testutil.ExpectedLen(t, got, 316)
+	testutil.ExpectedLen(t, got, 8+len(bitmap))
+	testutil.ExpectedBytesEqual(t, got[:8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0x2C, 0x01})
+	testutil.ExpectedBytesEqual(t, got[8:], bitmap)
+}
 
-	// Verify Chunk 1 header
-	testutil.ExpectedBytesEqual(t, got[:8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0xFF, 0x00})
+// Verify that larger images preserve all bytes across raster command boundaries.
+func TestBuildImage_SplitsAtConfiguredHeight(t *testing.T) {
+	const bytesPerRow = 2
+	height := maxImgSliceHeight + 1
+	bitmap := make([]byte, height*bytesPerRow)
+	for i := range bitmap {
+		bitmap[i] = byte(i % 251)
+	}
 
-	// Verify Chunk 2 header (0x2D = 45)
-	testutil.ExpectedBytesEqual(t, got[263:263+8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0x2D, 0x00})
+	got, err := BuildImage(base64.StdEncoding.EncodeToString(bitmap), ImageAttrs{
+		Width:  16,
+		Height: height,
+	})
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedLen(t, got, len(bitmap)+16)
+
+	firstDataEnd := 8 + maxImgSliceHeight*bytesPerRow
+	testutil.ExpectedBytesEqual(t, got[:8], []byte{
+		GS, 0x76, 0x30, 0x00,
+		bytesPerRow, 0x00,
+		byte(maxImgSliceHeight & 0xFF), byte(maxImgSliceHeight >> 8),
+	})
+	testutil.ExpectedBytesEqual(t, got[8:firstDataEnd], bitmap[:maxImgSliceHeight*bytesPerRow])
+	testutil.ExpectedBytesEqual(t, got[firstDataEnd:firstDataEnd+8], []byte{
+		GS, 0x76, 0x30, 0x00,
+		bytesPerRow, 0x00,
+		0x01, 0x00,
+	})
+	testutil.ExpectedBytesEqual(t, got[firstDataEnd+8:], bitmap[maxImgSliceHeight*bytesPerRow:])
 }
 
 func TestBuildImage_RejectsUnsafeDimensions(t *testing.T) {
@@ -347,4 +374,83 @@ func TestBuildImage_RejectsUnsafeDimensions(t *testing.T) {
 			t.Fatalf("expected unsafe image dimensions to be rejected: %+v", attrs)
 		}
 	}
+}
+
+// Verify Epson's GS ( L function 112 store / function 50 print byte layout.
+func TestBuildImage_EpsonGraphicsExactBytes(t *testing.T) {
+	bitmap := []byte{0xFF, 0x00, 0xAA, 0x55}
+	got, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(bitmap), ImageAttrs{
+		Align: "center", Width: 16, Height: 2,
+	}, ImageModeEpsonGraphics)
+	testutil.ExpectedNoError(t, err)
+
+	expected := []byte{
+		ESC, 0x61, 0x01,
+		GS, 0x28, 0x4C, 0x0E, 0x00, // pL/pH = 10 + 4 image bytes
+		0x30, 0x70, 0x30, 0x01, 0x01, 0x31, // fn=112, 1:1 monochrome, color 1
+		0x10, 0x00, 0x02, 0x00, // 16 x 2 dots
+		0xFF, 0x00, 0xAA, 0x55,
+		GS, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32, // fn=50 print
+	}
+	testutil.ExpectedBytesEqual(t, got, expected)
+}
+
+// Chunks must print all original raster rows exactly once and in order.
+func TestBuildImage_EpsonGraphicsAcrossSlices(t *testing.T) {
+	const rows = epsonGraphicsSliceHeight + 1
+	bitmap := make([]byte, rows)
+	for i := range bitmap {
+		bitmap[i] = byte(i % 251)
+	}
+	got, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(bitmap),
+		ImageAttrs{Width: 8, Height: rows}, ImageModeEpsonGraphics)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedLen(t, got, len(bitmap)+2*(15+7))
+
+	expectedFirst := []byte{GS, 0x28, 0x4C, 0xCA, 0x00,
+		0x30, 0x70, 0x30, 0x01, 0x01, 0x31, 0x08, 0x00, 0xC0, 0x00}
+	testutil.ExpectedBytesEqual(t, got[:15], expectedFirst)
+	firstEnd := 15 + epsonGraphicsSliceHeight
+	testutil.ExpectedBytesEqual(t, got[15:firstEnd], bitmap[:epsonGraphicsSliceHeight])
+	testutil.ExpectedBytesEqual(t, got[firstEnd:firstEnd+7],
+		[]byte{GS, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32})
+	second := firstEnd + 7
+	testutil.ExpectedBytesEqual(t, got[second:second+15], []byte{
+		GS, 0x28, 0x4C, 0x0B, 0x00, 0x30, 0x70, 0x30, 0x01,
+		0x01, 0x31, 0x08, 0x00, 0x01, 0x00,
+	})
+	testutil.ExpectedBytesEqual(t, got[second+15:second+16], bitmap[epsonGraphicsSliceHeight:])
+	testutil.ExpectedBytesEqual(t, got[second+16:],
+		[]byte{GS, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32})
+}
+
+// Wide graphics must reduce slice height to fit the 16-bit GS ( L length.
+func TestBuildImage_EpsonGraphicsPayloadSizeLimit(t *testing.T) {
+	const width = 64000
+	const height = 9
+	raw := make([]byte, (width/8)*height)
+	for i := range raw {
+		raw[i] = byte(i % 251)
+	}
+	got, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(raw),
+		ImageAttrs{Width: width, Height: height}, ImageModeEpsonGraphics)
+	testutil.ExpectedNoError(t, err)
+
+	const firstRows = 8 // floor((65535 - 10) / (width / 8))
+	const firstData = firstRows * (width / 8)
+	second := 15 + firstData + 7
+	testutil.ExpectedLen(t, got, len(raw)+2*(15+7))
+	firstPayloadSize := int(got[3]) | int(got[4])<<8
+	if firstPayloadSize != firstData+10 || firstPayloadSize > 65535 {
+		t.Fatalf("invalid first GS ( L payload size %d", firstPayloadSize)
+	}
+	testutil.ExpectedBytesEqual(t, got[15:15+firstData], raw[:firstData])
+	testutil.ExpectedBytesEqual(t, got[second+15:second+15+width/8], raw[firstData:])
+}
+
+func TestBuildImage_EpsonGraphicsRejectsUnsafeModesAndWidth(t *testing.T) {
+	_, err := BuildImageWithMode("AA==", ImageAttrs{Width: 8, Height: 1}, ImageMode("unknown"))
+	testutil.ExpectedError(t, err)
+	_, err = BuildImageWithMode("AA==", ImageAttrs{Width: 65536, Height: 1}, ImageModeEpsonGraphics)
+	testutil.ExpectedError(t, err)
 }
