@@ -27,6 +27,7 @@ type AppConfig struct {
 	HTTPSPort       int      `json:"https_port,omitempty"`
 	LANPrinters     []string          `json:"lan_printers,omitempty"`
 	LANImageModes   map[string]string `json:"lan_image_modes,omitempty"`
+	LANCUPSQueues   map[string]string `json:"lan_cups_queues,omitempty"`
 	NetworkPrinting bool              `json:"network_printing"`
 }
 
@@ -250,6 +251,7 @@ func (cm *Manager) RemoveLANPrinter(ip string) error {
 		if existing == ip {
 			cm.Data.LANPrinters = append(cm.Data.LANPrinters[:i], cm.Data.LANPrinters[i+1:]...)
 			delete(cm.Data.LANImageModes, ip)
+			delete(cm.Data.LANCUPSQueues, ip)
 			return cm.saveLocked()
 		}
 	}
@@ -285,8 +287,8 @@ func (cm *Manager) HasLANPrinter(ip string) bool {
 func (cm *Manager) GetLANPrinterImageMode(ip string) string {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
-	if cm.Data.LANImageModes[ip] == "epson_graphics" {
-		return "epson_graphics"
+	if mode := cm.Data.LANImageModes[ip]; mode == "epson_graphics" || mode == "cups_driver" {
+		return mode
 	}
 	return "legacy"
 }
@@ -319,5 +321,48 @@ func (cm *Manager) SetLANPrinterImageMode(ip, mode string) error {
 	} else {
 		delete(cm.Data.LANImageModes, ip)
 	}
+	return cm.saveLocked()
+}
+
+// GetLANPrinterCUPSQueue returns the explicitly selected local Epson queue.
+// An empty queue never authorizes a CUPS print.
+func (cm *Manager) GetLANPrinterCUPSQueue(ip string) string {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	for _, configured := range cm.Data.LANPrinters {
+		if configured == ip {
+			return cm.Data.LANCUPSQueues[ip]
+		}
+	}
+	return ""
+}
+
+// SetLANPrinterCUPSQueue atomically selects a verified CUPS queue for a LAN
+// printer and enables the experimental system driver mode. Callers must first
+// verify the queue uses this same IP:9100; this method is storage only.
+func (cm *Manager) SetLANPrinterCUPSQueue(ip, queue string) error {
+	if queue == "" {
+		return fmt.Errorf("CUPS queue name must not be empty")
+	}
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	configured := false
+	for _, existing := range cm.Data.LANPrinters {
+		if existing == ip {
+			configured = true
+			break
+		}
+	}
+	if !configured {
+		return fmt.Errorf("LAN printer %s is not configured", ip)
+	}
+	if cm.Data.LANCUPSQueues == nil {
+		cm.Data.LANCUPSQueues = make(map[string]string)
+	}
+	if cm.Data.LANImageModes == nil {
+		cm.Data.LANImageModes = make(map[string]string)
+	}
+	cm.Data.LANCUPSQueues[ip] = queue
+	cm.Data.LANImageModes[ip] = "cups_driver"
 	return cm.saveLocked()
 }
