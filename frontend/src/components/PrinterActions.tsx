@@ -16,6 +16,7 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
     "http" | "https" | "lan-http" | "lan-https" | null
   >(null);
   const [isTestPrinting, setIsTestPrinting] = useState(false);
+  const [isGraphicsTesting, setIsGraphicsTesting] = useState(false);
   const [isCashDrawerOpening, setIsCashDrawerOpening] = useState(false);
   const [imageMode, setImageMode] = useState(printer.lanImageMode || "legacy");
   const [savingImageMode, setSavingImageMode] = useState(false);
@@ -58,6 +59,21 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
       );
     } finally {
       setIsTestPrinting(false);
+    }
+  }
+
+  async function onGraphicsTest() {
+    setIsGraphicsTesting(true);
+    try {
+      await executePrint(printer, false, true);
+      toastContext.actions.showToast(
+        `Graphics test sent to ${printer.name}. Check that the lines printed correctly.`,
+        "success",
+      );
+    } catch (err) {
+      toastContext.actions.showToast(errorText(err, "Graphics test failed"), "danger");
+    } finally {
+      setIsGraphicsTesting(false);
     }
   }
 
@@ -157,6 +173,16 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
       >
         {isTestPrinting ? "Printing..." : "Test"}
       </button>
+
+      {printer.isLAN && printer.type === "receipt" && (
+        <button
+          onClick={onGraphicsTest}
+          disabled={isGraphicsTesting}
+          className="flex-1 border rounded-lg text-sm px-3 py-2 cursor-pointer border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+        >
+          {isGraphicsTesting ? "Printing image..." : "Test graphics"}
+        </button>
+      )}
 
       {printer.type === "receipt" && (
         <button
