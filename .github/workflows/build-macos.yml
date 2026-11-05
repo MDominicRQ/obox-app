@@ -7,11 +7,6 @@ concurrency:
 on:
   workflow_dispatch:
 
-  # Temporary validation of this draft PR's macOS matrix.
-  pull_request:
-    branches:
-      - main
-
   push:
     tags:
       - "*"
