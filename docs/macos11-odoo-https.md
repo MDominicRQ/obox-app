@@ -18,6 +18,11 @@ Each printer can expose up to four protocol-free Odoo addresses:
 
 Copy the address exactly as shown. Do **not** prefix it with `http://` or `https://` in the Odoo printer field; Odoo selects the protocol itself.
 
+Which address is correct depends on the browser **and** on the scheme of the Odoo page:
+
+- **Chromium with Local Network Access** may call the HTTP port even when Odoo is served over HTTPS, so use **Local HTTP / LNA** or **LAN HTTP / LNA**.
+- **Firefox and Safari** do not implement Local Network Access; Odoo then uses the scheme of the page. Use the HTTP address for an `http://` Odoo and the HTTPS address for an `https://` Odoo.
+
 If Odoo is open in a browser on the same Mac as ePOS Proxy, prefer **Local HTTP / LNA**. Loopback avoids LAN routing and macOS firewall/interface-selection issues. Use a LAN address only when the POS browser is on another device.
 
 ## Odoo 19
@@ -52,6 +57,40 @@ Odoo then calls a URL similar to:
 ```text
 https://192.168.1.77:4645/p/<printer-id>/cgi-bin/epos/service.cgi?devid=local_printer
 ```
+
+## Firefox and Safari
+
+Firefox and Safari do not implement the Local Network Access permission that Odoo 19 probes for. Odoo therefore disables LNA at runtime (`odoo.use_lna` becomes `false`) in both browsers and builds the printer URL with the scheme of the Odoo page:
+
+```text
+http(s)://<address you copied>/p/<printer-id>/cgi-bin/epos/service.cgi?devid=local_printer
+```
+
+The scheme comes from the Odoo page, not from the address field and not from `point_of_sale.use_lna`:
+
+- Odoo opened over **http://** → copy **Local HTTP / LNA** or **LAN HTTP / LNA**.
+- Odoo opened over **https://** → copy **Local HTTPS / LNA OFF** or **LAN HTTPS / LNA OFF**, and trust the local CA in that browser (see below).
+
+Chromium is different: with Local Network Access it always calls the HTTP port, even when Odoo is served over HTTPS. A single address cannot be correct for every browser and scheme, which is why the app shows all four.
+
+| Case | Odoo page | Address copied | URL Odoo calls | Outcome |
+| --- | --- | --- | --- | --- |
+| F1 | http:// | HTTP | http://&lt;address&gt; | Works if the proxy is reachable |
+| F2 | http:// | HTTPS | http://&lt;https-port&gt; | Fails: HTTP to a TLS port |
+| F3 | http:// | LAN HTTP | http://&lt;lan-address&gt; | Works if the Mac is reachable |
+| F4 | http:// | LAN HTTPS | http://&lt;https-port&gt; | Fails: HTTP to a TLS port |
+| F5 | https:// | HTTP | https://&lt;http-port&gt; | Fails: TLS to a plain HTTP port |
+| F6 | https:// | HTTPS | https://&lt;https-port&gt; | Works only if Firefox or Safari trusts the CA |
+| F7 | https:// | LAN HTTP | https://&lt;http-port&gt; | Fails: TLS to a plain HTTP port |
+| F8 | https:// | LAN HTTPS | https://&lt;https-port&gt; | Works only if the CA is trusted and the certificate covers that IP |
+
+Firefox reports these failures with different messages, and the message identifies the cause:
+
+- `SSL_ERROR_RX_RECORD_TOO_LONG` — the page sent TLS to the HTTP port; the address scheme and the Odoo scheme do not match.
+- `SEC_ERROR_UNKNOWN_ISSUER` — the scheme is correct but Firefox does not trust the local CA.
+- A connection reset or "corrupted content" message when the page is `http://` and the address is an HTTPS port — the Odoo page is talking plain HTTP to the TLS listener.
+
+If the first request in the POS appears to hang, reload the POS page before printing again so Odoo rebuilds the address with the current page scheme.
 
 ## Browser connectivity check
 
@@ -110,6 +149,22 @@ In Keychain Access:
 
 After changing trust, restart the browser if it had already cached the certificate error.
 
+### Firefox
+
+Firefox has its own certificate authorities. Firefox 120+ imports enterprise roots from the macOS Keychain by default (`security.enterprise_roots.enabled` is `true` from Firefox 120), so a CA marked **Always Trust** in Keychain Access is usually enough. Restart Firefox completely after changing trust.
+
+Older Firefox versions (including 115 ESR), managed machines that disable `security.enterprise_roots.enabled`, or a CA that is not marked **Always Trust** need the manual import. The same import is the reliable fallback on every version:
+
+1. Open **Settings → Privacy & Security → Certificates → View Certificates…**
+2. Select **Authorities → Import…** and choose `epos-proxy-ca.crt` from `~/Library/Application Support/EposProxy/certs/` (the same file **App → Install HTTPS Certificate** opens).
+3. Check **Trust this CA to identify websites** and accept.
+4. Restart Firefox.
+5. Open the exact HTTPS base address shown by the app (without `/p/<printer-id>`). It must return JSON containing `"status":"ok"` and no certificate warning.
+
+Safari uses the macOS Keychain directly, so the Keychain trust above is sufficient there.
+
+ePOS Proxy never runs privileged trust commands; every trust change is an explicit action in the browser or in Keychain Access.
+
 ## Background mode
 
 Closing the red window button hides the window instead of quitting. The proxy continues serving print jobs.
@@ -159,3 +214,5 @@ For CI/testing, the generated app is currently ad-hoc signed. Apple recommends a
 7. If HTTPS is required, disable LNA in Odoo, trust the local CA, and use **Open HTTPS**. The browser must show the same `status: ok` diagnostic page without a certificate warning.
 8. If the Mac LAN IP changes, restart ePOS Proxy so the server certificate can be reissued with current SANs. The CA remains unchanged.
 9. Check application logs for `EPOS HTTP Server Error`, `EPOS HTTPS Server Error`, or certificate preparation errors.
+10. In **Firefox or Safari**, do not rely on LNA: copy the address whose scheme matches the Odoo page (HTTP → port 45xx, HTTPS → port 46xx). A scheme mismatch fails before the certificate is checked.
+11. If Firefox shows `SEC_ERROR_UNKNOWN_ISSUER`, trust the local CA as described in **Firefox** above and restart the browser. Verify by opening the HTTPS base address: it must return `"status":"ok"` without a warning.

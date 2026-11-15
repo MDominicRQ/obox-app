@@ -100,6 +100,14 @@ export default function PrinterListItem({
             )}
 
             <div className="mt-2 text-xs text-gray-500">
+              Firefox and Safari do not support Odoo Local Network Access. There,
+              Odoo uses the scheme of the Odoo page, so copy the HTTP address
+              when Odoo is opened over http:// and the HTTPS address when it is
+              opened over https://. The scheme must match, or the connection
+              fails before the certificate is checked.
+            </div>
+
+            <div className="mt-1 text-xs text-gray-500">
               For Odoo 19 on Chrome 145+, prefer LAN HTTP with LNA enabled.
               Chrome now separates Local Network access from loopback access:
               127.0.0.1 requires the separate “Apps on device” permission.

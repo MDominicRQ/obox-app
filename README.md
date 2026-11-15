@@ -24,6 +24,8 @@ Download the latest release for your platform from the [Releases](../../releases
 -  Check Use Local Network access option
 -  Save and open your POS session
 
+Local Network Access only exists in Chromium. In Firefox or Safari Odoo uses the scheme of the Odoo page, so copy the HTTP address for an `http://` Odoo and the HTTPS address for an `https://` Odoo. See [macOS + Odoo 19 local printing](docs/macos11-odoo-https.md) for the full matrix and the Firefox certificate steps.
+
 
 ### Linux
 

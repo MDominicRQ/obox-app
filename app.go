@@ -560,7 +560,7 @@ func (a *App) InstallHTTPSCertificate() error {
 
 	message := "The ePOS Proxy local CA certificate has been opened. Mark it as trusted in your operating system before using the HTTPS address from Odoo."
 	if runtime.GOOS == "darwin" {
-		message = "The ePOS Proxy local CA certificate has been opened in Keychain Access. Import it, open 'ePOS Proxy Local CA', expand Trust, and set 'When using this certificate' to 'Always Trust'. macOS may request an administrator password. ePOS Proxy does not run privileged trust commands silently."
+		message = "The ePOS Proxy local CA certificate has been opened in Keychain Access. Import it, open 'ePOS Proxy Local CA', expand Trust, and set 'When using this certificate' to 'Always Trust'. macOS may request an administrator password. ePOS Proxy does not run privileged trust commands silently.\n\nFirefox: Firefox 120+ can use a Keychain CA that is set to 'Always Trust' after Firefox is restarted. If Firefox still reports a certificate error, import the same certificate manually under Settings > Privacy & Security > Certificates > View Certificates > Authorities > Import, check 'Trust this CA to identify websites', and restart Firefox. Safari uses the macOS Keychain directly."
 	}
 
 	_, err := a.dlg().Message(a.ctx, wailsruntime.MessageDialogOptions{
