@@ -9,19 +9,19 @@ ePOS Proxy exposes both HTTP and HTTPS while keeping the actual USB/LAN printer 
 
 ## Addresses shown by the app
 
-Each printer can expose up to four protocol-free Odoo addresses:
+Each printer can expose up to four protocol-free Odoo addresses, labeled exactly like this in the app:
 
-- **Local HTTP / LNA**: `127.0.0.1:4545-4555/p/<printer-id>`
-- **Local HTTPS / Legacy**: `127.0.0.1:4645-4655/p/<printer-id>`
-- **LAN HTTP / LNA**: `<lan-ip>:4545-4555/p/<printer-id>`
-- **LAN HTTPS / Legacy**: `<lan-ip>:4645-4655/p/<printer-id>`
+- **Local HTTP / LNA ON**: `127.0.0.1:4545-4555/p/<printer-id>`
+- **Local HTTPS / LNA OFF**: `127.0.0.1:4645-4655/p/<printer-id>`
+- **LAN HTTP / LNA ON**: `<lan-ip>:4545-4555/p/<printer-id>`
+- **LAN HTTPS / LNA OFF**: `<lan-ip>:4645-4655/p/<printer-id>`
 
-Copy the address exactly as shown. Do **not** prefix it with `http://` or `https://` in the Odoo printer field; Odoo selects the protocol itself.
+The card also has **Copy HTTP**, **Copy HTTPS**, **Copy LAN HTTP** and **Copy LAN HTTPS** buttons for the same values. Copy the address exactly as shown. Do **not** prefix it with `http://` or `https://` in the Odoo printer field; Odoo selects the protocol itself.
 
 Which address is correct depends on the browser **and** on the scheme of the Odoo page:
 
-- **Chromium with Local Network Access** may call the HTTP port even when Odoo is served over HTTPS, so use **Local HTTP / LNA** or **LAN HTTP / LNA**.
-- **Firefox and Safari** do not implement Local Network Access; Odoo then uses the scheme of the page. Use the HTTP address for an `http://` Odoo and the HTTPS address for an `https://` Odoo.
+- **Chromium with Local Network Access** may call the HTTP port even when Odoo is served over HTTPS, so use **Local HTTP / LNA ON** or **LAN HTTP / LNA ON**.
+- **Firefox and Safari** do not implement Local Network Access. With **Use Local Network Access** disabled in the Odoo POS configuration, Odoo uses the scheme of the page: copy the HTTP address for an `http://` Odoo and the HTTPS address for an `https://` Odoo. Leaving that option enabled makes Odoo build an `http://` URL anyway; see [Firefox and Safari](#firefox-and-safari).
 
 If Odoo is open in a browser on the same Mac as ePOS Proxy, prefer **Local HTTP / LNA**. Loopback avoids LAN routing and macOS firewall/interface-selection issues. Use a LAN address only when the POS browser is on another device.
 
@@ -60,16 +60,18 @@ https://192.168.1.77:4645/p/<printer-id>/cgi-bin/epos/service.cgi?devid=local_pr
 
 ## Firefox and Safari
 
-Firefox and Safari do not implement the Local Network Access permission that Odoo 19 probes for. Odoo therefore disables LNA at runtime (`odoo.use_lna` becomes `false`) in both browsers and builds the printer URL with the scheme of the Odoo page:
+Firefox and Safari do not implement the Local Network Access permission that Odoo 19 probes for, but Odoo builds the printer URL **once, while the POS loads**, from `odoo.use_lna`:
 
 ```text
-http(s)://<address you copied>/p/<printer-id>/cgi-bin/epos/service.cgi?devid=local_printer
+// point_of_sale/static/src/app/utils/printer/epson_printer.js
+protocol = odoo.use_lna ? "http:" : window.location.protocol
+address  = protocol + "//" + ip + "/cgi-bin/epos/service.cgi?devid=local_printer"
 ```
 
-The scheme comes from the Odoo page, not from the address field and not from `point_of_sale.use_lna`:
+`initLNA()` does reset `odoo.use_lna` to `false` in these browsers, but it runs in `PosStore.setup()` **after** `initServerData()` has already created the printers. The URL is therefore fixed with the value injected into the page from the POS configuration (`use_lna` in the `point_of_sale.index` template):
 
-- Odoo opened over **http://** → copy **Local HTTP / LNA** or **LAN HTTP / LNA**.
-- Odoo opened over **https://** → copy **Local HTTPS / LNA OFF** or **LAN HTTPS / LNA OFF**, and trust the local CA in that browser (see below).
+- **Use Local Network Access disabled** — the reliable setting for Firefox and Safari. The URL uses the scheme of the Odoo page: on `http://` copy **Local HTTP / LNA ON** or **LAN HTTP / LNA ON**; on `https://` copy **Local HTTPS / LNA OFF** or **LAN HTTPS / LNA OFF** and trust the local CA in that browser.
+- **Use Local Network Access enabled** — `odoo.use_lna` is still `true` when the printers are created, so Odoo builds `http://<address>`. On an `https://` page Firefox and Safari block that request as **mixed content** before any connection or certificate check happens. Odoo reports the printer as unreachable and the Firefox console shows a blocked mixed-content request. Reloading the POS does **not** fix it, because the same order is repeated on every load: disable **Use Local Network Access** in the POS configuration (also exposed as `point_of_sale.use_lna`), save, and reload the POS.
 
 Chromium is different: with Local Network Access it always calls the HTTP port, even when Odoo is served over HTTPS. A single address cannot be correct for every browser and scheme, which is why the app shows all four.
 
@@ -80,23 +82,32 @@ Chromium is different: with Local Network Access it always calls the HTTP port, 
 | F3 | http:// | LAN HTTP | http://&lt;lan-address&gt; | Works if the Mac is reachable |
 | F4 | http:// | LAN HTTPS | http://&lt;https-port&gt; | Fails: HTTP to a TLS port |
 | F5 | https:// | HTTP | https://&lt;http-port&gt; | Fails: TLS to a plain HTTP port |
-| F6 | https:// | HTTPS | https://&lt;https-port&gt; | Works only if Firefox or Safari trusts the CA |
+| F6 | https://, LNA disabled | HTTPS | https://&lt;https-port&gt; | Works only if Firefox or Safari trusts the CA |
 | F7 | https:// | LAN HTTP | https://&lt;http-port&gt; | Fails: TLS to a plain HTTP port |
-| F8 | https:// | LAN HTTPS | https://&lt;https-port&gt; | Works only if the CA is trusted and the certificate covers that IP |
+| F8 | https://, LNA disabled | LAN HTTPS | https://&lt;https-port&gt; | Works only if the CA is trusted and the certificate covers that IP |
+| F9 | https://, LNA enabled | any | http://&lt;that address&gt; | Fails: mixed content blocked; disable LNA in the POS configuration |
 
 Firefox reports these failures with different messages, and the message identifies the cause:
 
 - `SSL_ERROR_RX_RECORD_TOO_LONG` — the page sent TLS to the HTTP port; the address scheme and the Odoo scheme do not match.
 - `SEC_ERROR_UNKNOWN_ISSUER` — the scheme is correct but Firefox does not trust the local CA.
-- A connection reset or "corrupted content" message when the page is `http://` and the address is an HTTPS port — the Odoo page is talking plain HTTP to the TLS listener.
+- HTTP 400, connection reset or "corrupted content" when the page is `http://` and the address is an HTTPS port — the Odoo page is talking plain HTTP to the TLS listener, which rejects it.
+- "Blocked loading mixed active content" in the console, or a generic unreachable error in Odoo, when the page is `https://` and **Use Local Network Access** is still enabled — that is F9, not a certificate problem.
 
-If the first request in the POS appears to hang, reload the POS page before printing again so Odoo rebuilds the address with the current page scheme.
+These rules were checked against `odoo/odoo` branch `19.0` at commit `a157617c921669c5c036509b341be6a07ad1069d` (`epson_printer.js`, `init_lna.js`, `pos_store.js`, `pos_assets_index.xml`). The excerpts are pinned in `internal/compat/testdata/odoo19/` so documentation, tests and upstream source stay aligned.
 
 ## Browser connectivity check
 
 ePOS Proxy supports the same browser check recommended for Epson/Odoo devices.
 
-The app now has **Open HTTP** and **Open HTTPS** buttons. They open the exact configured base address in the system browser.
+The printer card shows the address and offers **Copy HTTP**, **Copy HTTPS**, **Copy LAN HTTP** and **Copy LAN HTTPS**. There is no button that opens a browser; paste the copied base address into the browser's address bar and add the scheme yourself, because the copied value has none:
+
+```text
+http://127.0.0.1:4545/          (Local HTTP / LNA ON, without /p/<printer-id>)
+https://127.0.0.1:4645/         (Local HTTPS / LNA OFF, without /p/<printer-id>)
+```
+
+Typing `127.0.0.1:4645` without `https://` makes the browser try plain HTTP against the TLS listener and the page fails; that is not a certificate problem.
 
 A working base address returns JSON containing `"status":"ok"` and the printer ID. This is also the URL Odoo tells users to open when manually accepting an HTTPS certificate, so it no longer returns 404.
 
@@ -159,7 +170,7 @@ Older Firefox versions (including 115 ESR), managed machines that disable `secur
 2. Select **Authorities → Import…** and choose `epos-proxy-ca.crt` from `~/Library/Application Support/EposProxy/certs/` (the same file **App → Install HTTPS Certificate** opens).
 3. Check **Trust this CA to identify websites** and accept.
 4. Restart Firefox.
-5. Open the exact HTTPS base address shown by the app (without `/p/<printer-id>`). It must return JSON containing `"status":"ok"` and no certificate warning.
+5. Open the HTTPS base address shown by the app in the browser, typing the scheme explicitly and removing the printer path, for example `https://127.0.0.1:4645/`. It must return JSON containing `"status":"ok"` and no certificate warning.
 
 Safari uses the macOS Keychain directly, so the Keychain trust above is sufficient there.
 
@@ -207,12 +218,12 @@ For CI/testing, the generated app is currently ad-hoc signed. Apple recommends a
 
 1. Keep ePOS Proxy running; closing the window is safe, but **App → Quit** stops printing.
 2. Confirm the in-app **Test** button prints. It intentionally uses the local HTTP proxy and validates the proxy-to-printer path.
-3. For current Chromium/Odoo 19 on the same Mac, enable LNA and use **Local HTTP / LNA** (`127.0.0.1`).
-4. Use **Open HTTP**. The browser must show the ePOS Proxy `status: ok` diagnostic page.
+3. For current Chromium/Odoo 19 on the same Mac, enable LNA and use **Local HTTP / LNA ON** (`127.0.0.1`).
+4. Copy the Local HTTP address, paste it in the browser with an explicit `http://` prefix and drop the `/p/<printer-id>` part: `http://127.0.0.1:4545/`. The browser must show the ePOS Proxy `status: ok` diagnostic page.
 5. Check the browser's **Local network** permission for the exact Odoo database origin if Odoo still reports the printer unreachable.
 6. Use LAN addresses only when the POS browser is running on another device; on modern macOS, allow Local Network access for the browser/app and check the macOS Application Firewall.
-7. If HTTPS is required, disable LNA in Odoo, trust the local CA, and use **Open HTTPS**. The browser must show the same `status: ok` diagnostic page without a certificate warning.
+7. If HTTPS is required, disable LNA in Odoo, trust the local CA, and open the HTTPS base address with an explicit scheme (`https://127.0.0.1:4645/`). The browser must show the same `status: ok` diagnostic page without a certificate warning.
 8. If the Mac LAN IP changes, restart ePOS Proxy so the server certificate can be reissued with current SANs. The CA remains unchanged.
 9. Check application logs for `EPOS HTTP Server Error`, `EPOS HTTPS Server Error`, or certificate preparation errors.
-10. In **Firefox or Safari**, do not rely on LNA: copy the address whose scheme matches the Odoo page (HTTP → port 45xx, HTTPS → port 46xx). A scheme mismatch fails before the certificate is checked.
-11. If Firefox shows `SEC_ERROR_UNKNOWN_ISSUER`, trust the local CA as described in **Firefox** above and restart the browser. Verify by opening the HTTPS base address: it must return `"status":"ok"` without a warning.
+10. In **Firefox or Safari**, disable **Use Local Network Access** in the Odoo POS configuration and copy the address whose scheme matches the Odoo page (HTTP → port 45xx, HTTPS → port 46xx). A scheme mismatch fails before the certificate is checked.
+11. If Firefox shows `SEC_ERROR_UNKNOWN_ISSUER`, trust the local CA as described in **Firefox** above and restart the browser. Verify by opening `https://<address-without-path>/`; it must return `"status":"ok"` without a warning.

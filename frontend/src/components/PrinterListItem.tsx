@@ -100,11 +100,13 @@ export default function PrinterListItem({
             )}
 
             <div className="mt-2 text-xs text-gray-500">
-              Firefox and Safari do not support Odoo Local Network Access. There,
-              Odoo uses the scheme of the Odoo page, so copy the HTTP address
-              when Odoo is opened over http:// and the HTTPS address when it is
-              opened over https://. The scheme must match, or the connection
-              fails before the certificate is checked.
+              Firefox and Safari do not support Odoo Local Network Access. With
+              “Use Local Network Access” disabled in the Odoo POS configuration,
+              Odoo uses the scheme of the page: copy the HTTP address for an
+              http:// Odoo and the HTTPS address for an https:// Odoo, or the
+              request fails before the certificate is checked. If that option
+              stays enabled, Odoo builds an http:// URL and Firefox blocks it as
+              mixed content on an https:// page.
             </div>
 
             <div className="mt-1 text-xs text-gray-500">

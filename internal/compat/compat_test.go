@@ -72,9 +72,10 @@ func TestEffectiveURL(t *testing.T) {
 	}
 }
 
-// TestFirefoxMatrix covers rows F1-F8 of the compatibility matrix in
-// docs/macos11-odoo-https.md. Firefox never has LNA, so both configured
-// values must converge on the same outcome.
+// TestFirefoxMatrix covers the supported rows F1-F8 of the compatibility
+// matrix in docs/macos11-odoo-https.md, where "Use Local Network Access" is
+// disabled in the Odoo POS configuration. Firefox has no LNA, so both
+// configured values converge on the same outcome once initLNA() has run.
 func TestFirefoxMatrix(t *testing.T) {
 	cases := []struct {
 		id            string
@@ -93,6 +94,9 @@ func TestFirefoxMatrix(t *testing.T) {
 	}
 
 	for _, tc := range cases {
+		// After initLNA() Firefox never has LNA, so both configured values
+		// converge on the same outcome; the construction-time case where the
+		// configured value still applies is covered by TestClassifyAtLoad.
 		for _, configured := range []bool{true, false} {
 			name := fmt.Sprintf("%s lna=%v", tc.id, configured)
 			t.Run(name, func(t *testing.T) {
@@ -155,5 +159,51 @@ func TestClassifyRejectsUnknownSchemes(t *testing.T) {
 		if _, err := Classify(tc.page, false, tc.address); err == nil {
 			t.Fatalf("Classify(%q, false, %q) accepted an invalid scheme", tc.page, tc.address)
 		}
+		if _, err := ClassifyAtLoad(Firefox, true, tc.page, tc.address); err == nil {
+			t.Fatalf("ClassifyAtLoad(Firefox, true, %q, %q) accepted an invalid scheme", tc.page, tc.address)
+		}
+	}
+}
+
+// TestClassifyAtLoad covers row F9 plus the controls that prove the difference
+// between the load-time state and the steady state. Odoo builds the printer URL
+// in EpsonPrinter.setup(), which runs before initLNA() can clear odoo.use_lna.
+func TestClassifyAtLoad(t *testing.T) {
+	cases := []struct {
+		name          string
+		browser       Browser
+		configuredLNA bool
+		pageScheme    string
+		addressScheme string
+		want          Outcome
+	}{
+		// F9: the reported Firefox failure mode. Odoo still has use_lna=true at
+		// construction time, builds http://, and Firefox blocks it as mixed
+		// content whatever address was copied.
+		{"F9 firefox https page with LNA enabled and HTTP address", Firefox, true, HTTPS, HTTP, OutcomeMixedContent},
+		{"F9 firefox https page with LNA enabled and HTTPS address", Firefox, true, HTTPS, HTTPS, OutcomeMixedContent},
+		{"F9 safari https page with LNA enabled", Safari, true, HTTPS, HTTP, OutcomeMixedContent},
+		// With LNA disabled, which is the documented setting for Firefox and
+		// Safari, the page scheme wins again.
+		{"F6 firefox https page with LNA disabled", Firefox, false, HTTPS, HTTPS, OutcomeCARequired},
+		{"F5 firefox https page with LNA disabled and HTTP address", Firefox, false, HTTPS, HTTP, OutcomeTLSOnPlaintext},
+		{"F1 firefox http page with LNA enabled", Firefox, true, HTTP, HTTP, OutcomeOK},
+		// Chromium keeps LNA, so it is allowed to call the HTTP port from an
+		// HTTPS page; nothing is mixed content there.
+		{"C2 chromium https page with LNA enabled", Chromium, true, HTTPS, HTTP, OutcomeOK},
+		{"C3 chromium https page with LNA enabled and HTTPS address", Chromium, true, HTTPS, HTTPS, OutcomePlaintextOnTLS},
+		{"C4 chromium https page with LNA disabled", Chromium, false, HTTPS, HTTPS, OutcomeCARequired},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ClassifyAtLoad(tc.browser, tc.configuredLNA, tc.pageScheme, tc.addressScheme)
+			if err != nil {
+				t.Fatalf("ClassifyAtLoad(%q, %v, %q, %q): %v", tc.browser, tc.configuredLNA, tc.pageScheme, tc.addressScheme, err)
+			}
+			if got != tc.want {
+				t.Fatalf("ClassifyAtLoad(%q, %v, %q, %q) = %q, want %q", tc.browser, tc.configuredLNA, tc.pageScheme, tc.addressScheme, got, tc.want)
+			}
+		})
 	}
 }
