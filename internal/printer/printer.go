@@ -65,7 +65,10 @@ type Printer struct {
 	outEndpoint *gousb.OutEndpoint
 	// LAN fields
 	tcpConn net.Conn
-	jobs    chan Job
+	// dial opens the LAN connection. It is nil in production, where
+	// net.DialTimeout is used; tests set it to simulate a slow device open.
+	dial func(address string, timeout time.Duration) (net.Conn, error)
+	jobs chan Job
 }
 
 func newPrinter(id string) (*Printer, error) {
@@ -124,7 +127,16 @@ func (p *Printer) Write(data []byte) error {
 	return p.write(data, nil)
 }
 
+// write is writeContext for callers that have no request to cancel.
 func (p *Printer) write(data []byte, tr *trace.Trace) error {
+	return p.writeContext(context.Background(), data, tr)
+}
+
+func (p *Printer) writeContext(ctx context.Context, data []byte, tr *trace.Trace) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -133,6 +145,19 @@ func (p *Printer) write(data []byte, tr *trace.Trace) error {
 	openErr := p.ensureOpen()
 	if tr != nil {
 		tr.MarkOpen(time.Since(openStarted), reused)
+	}
+	// The job was accepted by the queue before the open began, so the client can
+	// give up while a LAN dial or a USB enumeration/claim is still running.
+	// Nothing has reached the device at this point: dropping the ticket and
+	// closing the connection is safer than printing one the POS already reported
+	// as failed. After the first Write below, cancellation is never observed
+	// again: a ticket that started reaching the device always completes.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if tr != nil {
+			tr.MarkClientCanceled(trace.CancelStageOpening)
+		}
+		p.closeDeviceTraced(tr)
+		return fmt.Errorf("%w: %v", ErrCanceled, ctxErr)
 	}
 	if openErr != nil {
 		return openErr
@@ -255,7 +280,13 @@ func (p *Printer) ensureOpenLANLocked() error {
 
 	addr := net.JoinHostPort(p.lanIP, fmt.Sprintf("%d", LANPort))
 	logger.Debugf("Attempting to connect to LAN printer %s at %s", p.idToString(), addr)
-	conn, err := net.DialTimeout("tcp", addr, LANConnectTimeout)
+	dial := p.dial
+	if dial == nil {
+		dial = func(address string, timeout time.Duration) (net.Conn, error) {
+			return net.DialTimeout("tcp", address, timeout)
+		}
+	}
+	conn, err := dial(addr, LANConnectTimeout)
 	if err != nil {
 		logger.Errorf("Failed to connect to LAN printer %s at %s: %v", p.idToString(), addr, err)
 		return fmt.Errorf("failed to connect to LAN printer at %s: %w", addr, err)

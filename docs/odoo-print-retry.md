@@ -107,19 +107,26 @@ Decision points, in order:
 
 | When | Behaviour | Trace |
 |---|---|---|
-| Request already canceled before queueing | No queueing, no device open for the job, no print | `code=ClientCanceled client_canceled=true cancel_stage=before_enqueue` |
-| Canceled while queued, before the device write starts | The job is skipped and reports `ErrCanceled`; nothing is written | `cancel_stage=queued` |
-| Canceled after the first device byte | The write always completes in full and reports its real result; nothing is interrupted or resent | `cancel_stage=after_write` |
-| Any device write error | The error is returned once; the proxy never retries on its own | `status=error` |
+| Request already canceled before queueing | No queueing and no device open for the job; nothing printed | `code=ClientCanceled client_canceled=true cancel_stage=before_enqueue` |
+| Canceled while queued, before the job starts | The job is skipped and reports `ErrCanceled`; nothing is written | `cancel_stage=queued` |
+| Canceled while the connection is being opened | Checked again after `ensureOpen`, before the first byte: the device is closed and the job reports `ErrCanceled`; nothing is written | `cancel_stage=opening` |
+| Canceled after the first device byte | The write always completes in full and reports its real result; nothing is interrupted or resent | `cancel_stage=after_write` on success |
+| Client gone and the device write failed | The error is returned once; the ticket may have been partially written (see `device_bytes`) | `cancel_stage=after_write_failed`, `status=error` |
+| Any device write error, client still connected | The error is returned once; the proxy never retries on its own | `status=error` |
 
 Code:
 
 - `internal/server/server.go` — `runPrintJob`, `noteClientCanceled`,
-  `printData`, `printLabel`.
-- `internal/printer/manager.go` — `WriteAsyncContext` checks the context once,
-  at job start, and never inside the write.
-- `internal/printer/printer.go` — `write` does not take or observe a context,
+  `cancelStageFor`, `printData`, `printLabel`.
+- `internal/printer/manager.go` — `WriteAsyncContext` checks the context at job
+  start, before `Get` and again in the job.
+- `internal/printer/printer.go` — `writeContext` re-checks the context *after*
+  `ensureOpen` (LAN dial up to 3 s, or USB enumeration/claim) and *before* the
+  first `Write`. After that first write, cancellation is never observed again,
   which is what makes "once sent, complete it" true by construction.
+
+Only a successful job is labelled `after_write`. A device error is never
+reported as if the ticket had been printed.
 
 ### 2.1 Why skipping a queued job is the safe side
 
@@ -158,6 +165,11 @@ the printer, and it can differ between two prints of the same order if the
 rendered content changes (for example a reprint marker or a changed total).
 Physical evidence is still required to confirm a duplicate.
 
+`after_write_failed` means the client was gone and the job ended in an error:
+the trace line keeps `status=error` and `device_bytes`, so an operator can tell a
+fully written ticket (`after_write`, `device_bytes` equals `escpos_bytes`) from a
+partial or absent one. Do not treat `after_write_failed` as "printed".
+
 ## 3. Limitations (read before claiming anything)
 
 - **No zero-duplicate claim.** The proxy cannot stop the operator from pressing
@@ -175,10 +187,21 @@ Physical evidence is still required to confirm a duplicate.
   the response write, which is why the post-response check exists. The exact
   behaviour in Firefox and Safari on macOS has **not** been observed here.
 - **Late response, already printed.** The proxy cannot unprint. It logs
-  `cancel_stage=after_write` so the possibility is visible.
-- **Very short abort races.** A cancel that arrives between the pre-enqueue
-  check and the printer loop starting the job cannot be excluded; the trace
-  records where it was seen, and the job-start check closes most of the window.
+  `cancel_stage=after_write` so the possibility is visible, and
+  `after_write_failed` when the write itself failed, which may leave a partial
+  ticket on the paper.
+- **The open window is real but bounded.** The job-start check runs before the
+  device is opened; the second check runs after `ensureOpen`, which can take up
+  to `LANConnectTimeout` (3 s) or a USB enumeration/claim. A cancellation during
+  that open is recorded as `opening` and nothing is written. A cancellation that
+  arrives after the second check but before the first byte cannot be excluded by
+  software; it is the remaining microsecond-scale race.
+- **Server shutdown and stream resets cancel the context too.** Stopping the
+  proxy (`Server.Stop`) or an HTTP/2 stream reset cancels `r.Context()` exactly
+  like a client abort, so a job queued at shutdown can be dropped and will log
+  `client_canceled=true`. That protects the device from printing after the app
+  is closing, but it is not an operator retry; read the surrounding log lines
+  before assuming a duplicate.
 - **No physical validation.** No Mac, printer, Firefox or Odoo instance was used;
   everything above is source analysis plus Linux unit/integration tests. Physical
   evidence belongs to the baseline task.

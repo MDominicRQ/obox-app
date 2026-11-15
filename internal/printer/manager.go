@@ -112,12 +112,12 @@ func (m *Manager) WriteAsyncTraced(printerID string, data []byte, tr *trace.Trac
 
 // WriteAsyncContext queues a print job bound to the request context.
 //
-// The context is only consulted once, when the printer loop is about to write
-// to the device: if the client already abandoned the request, the job is
-// skipped and reports ErrCanceled, because printing it would add an orphan
-// ticket the POS already reported as failed. Once the write starts it is never
-// interrupted, so a job that reached the device always completes and reports
-// its real result.
+// The context is consulted twice: when the printer loop is about to run the job
+// and again after the device connection is open, before the first byte. If the
+// client abandoned the request in either window the job is skipped and reports
+// ErrCanceled, because printing it would add an orphan ticket the POS already
+// reported as failed. Once the first write starts it is never interrupted, so a
+// job that reached the device always completes and reports its real result.
 //
 // No path in the manager re-sends a job on failure: a retry can only come from
 // a new client request.
@@ -154,7 +154,7 @@ func (m *Manager) WriteAsyncContext(ctx context.Context, printerID string, data 
 			tr.MarkJobStart()
 		}
 		logger.Debugf("Executing print job for printer %s", printerID)
-		if err := p.write(data, tr); err != nil {
+		if err := p.writeContext(ctx, data, tr); err != nil {
 			return JobResult{Err: fmt.Errorf("print job failed for printer %s: %w", printerID, err)}
 		}
 		logger.Debugf("Print job completed for printer %s", printerID)

@@ -321,3 +321,22 @@ func TestLineReportsNoCancellationByDefault(t *testing.T) {
 	testutil.ExpectedEqual(t, got["body_sha256"], unknownField)
 	testutil.ExpectedFalse(t, tr.ClientCanceled())
 }
+
+func TestClientCanceledKeepsFirstStage(t *testing.T) {
+	tr := New("req-first-stage", "LAN:127.0.0.1", TransportLAN, KindReceipt)
+
+	tr.MarkClientCanceled(CancelStageOpening)
+	tr.MarkClientCanceled(CancelStageAfterWrite)
+
+	got := parseFields(tr.Line())
+	testutil.ExpectedEqual(t, got["client_canceled"], "true")
+	testutil.ExpectedEqual(t, got["cancel_stage"], CancelStageOpening)
+}
+
+func TestDeviceBytesStartsAtZero(t *testing.T) {
+	tr := New("req-bytes", "LAN:127.0.0.1", TransportLAN, KindReceipt)
+	testutil.ExpectedEqual(t, tr.DeviceBytes(), 0)
+
+	tr.SetWrite(time.Millisecond, 100, 40)
+	testutil.ExpectedEqual(t, tr.DeviceBytes(), 40)
+}

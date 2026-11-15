@@ -213,3 +213,103 @@ func TestWriteFailureIsNotRetried(t *testing.T) {
 	testutil.ExpectedEqual(t, int(conn.writes.Load()), 1)
 	testutil.ExpectedEqual(t, len(p.jobs), 0)
 }
+
+func TestWriteAsyncContextCancelsDuringSlowOpenBeforeFirstByte(t *testing.T) {
+	mgr := NewManager()
+	printerID := EncodeLANPrinterID("127.0.0.1")
+	conn := &recordingConn{}
+	openStarted := make(chan struct{})
+	releaseOpen := make(chan struct{})
+
+	p := &Printer{
+		connectionType: ConnKindLAN,
+		lanIP:          "127.0.0.1",
+		jobs:           make(chan Job, QueueSize),
+		dial: func(string, time.Duration) (net.Conn, error) {
+			close(openStarted)
+			<-releaseOpen
+			return conn, nil
+		},
+	}
+	registerExistingPrinter(mgr, printerID, p)
+	t.Cleanup(func() { p.close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tr := trace.New("req-slow-open", printerID, trace.TransportLAN, trace.KindReceipt)
+
+	reply, err := mgr.WriteAsyncContext(ctx, printerID, []byte("MUST NOT PRINT"), tr)
+	testutil.ExpectedNoError(t, err)
+
+	select {
+	case <-openStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("device open never started")
+	}
+
+	// The client gives up while the LAN dial is still running. No byte has been
+	// written, so the ticket must be dropped when the open returns.
+	cancel()
+	close(releaseOpen)
+
+	select {
+	case result := <-reply:
+		testutil.ExpectedTrue(t, errors.Is(result.Err, ErrCanceled), "expected ErrCanceled, got "+fmt.Sprint(result.Err))
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the slow-open job reply")
+	}
+
+	testutil.ExpectedEqual(t, conn.writeCount(), 0)
+	testutil.ExpectedLen(t, conn.received(), 0)
+
+	line := tr.Line()
+	testutil.ExpectedContains(t, line, "client_canceled=true")
+	testutil.ExpectedContains(t, line, "cancel_stage="+trace.CancelStageOpening)
+	testutil.ExpectedEqual(t, tr.DeviceBytes(), 0)
+}
+
+// partialConn accepts a fixed number of bytes and then fails, like a device
+// that drops the connection halfway through a ticket.
+type partialConn struct {
+	remaining int
+	written   int
+}
+
+func (c *partialConn) Read([]byte) (int, error) { return 0, io.EOF }
+func (c *partialConn) Write(p []byte) (int, error) {
+	if c.remaining <= 0 {
+		return 0, errors.New("device write failed")
+	}
+	n := min(len(p), c.remaining)
+	c.remaining -= n
+	c.written += n
+	return n, errors.New("device write failed")
+}
+func (c *partialConn) Close() error                     { return nil }
+func (c *partialConn) LocalAddr() net.Addr              { return fakeAddr{} }
+func (c *partialConn) RemoteAddr() net.Addr             { return fakeAddr{} }
+func (c *partialConn) SetDeadline(time.Time) error      { return nil }
+func (c *partialConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *partialConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestFailedWriteRecordsDeviceBytes(t *testing.T) {
+	tests := []struct {
+		name      string
+		conn      net.Conn
+		wantBytes int
+	}{
+		{name: "nothing accepted", conn: &partialConn{remaining: 0}, wantBytes: 0},
+		{name: "partial ticket", conn: &partialConn{remaining: 64 * 1024}, wantBytes: 64 * 1024},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := trace.New("req-failed-"+tc.name, "LAN:127.0.0.1", trace.TransportLAN, trace.KindReceipt)
+			p := &Printer{connectionType: ConnKindLAN, lanIP: "127.0.0.1", tcpConn: tc.conn, jobs: make(chan Job, QueueSize)}
+
+			err := p.writeContext(context.Background(), bytes.Repeat([]byte("T"), 128*1024), tr)
+			testutil.ExpectedTrue(t, err != nil, "a failed write must return an error")
+			testutil.ExpectedEqual(t, tr.DeviceBytes(), tc.wantBytes)
+			testutil.ExpectedFalse(t, tr.ClientCanceled(), "the write path must not invent a cancellation")
+		})
+	}
+}

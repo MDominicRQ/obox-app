@@ -391,7 +391,13 @@ const clientCanceledCode = "ClientCanceled"
 // changing what is sent to the device. The line lets an operator spot a print
 // that happened after the POS already reported a failure, which is the usual
 // origin of a duplicate caused by a manual retry.
+//
+// It is a no-op once the ticket already carries a cancellation: the first stage
+// recorded is the most precise one, and one ticket must not emit two warnings.
 func noteClientCanceled(tr *trace.Trace, stage, printerID string, reason error) {
+	if tr.ClientCanceled() {
+		return
+	}
 	tr.MarkClientCanceled(stage)
 	logger.Warnf(
 		"Client abandoned print ticket printer=%s request_id=%s stage=%s err=%v",
@@ -399,15 +405,33 @@ func noteClientCanceled(tr *trace.Trace, stage, printerID string, reason error) 
 	)
 }
 
+// cancelStageFor classifies a ticket whose client was gone when the job ended.
+//
+// Only a successful job is reported as after_write: a device error may have
+// written a partial ticket, so it gets its own stage instead of claiming the
+// ticket was printed. A job dropped before touching the device is ErrCanceled,
+// and the printer layer may already have recorded a more precise stage; that
+// first observation wins in the trace.
+func cancelStageFor(err error) string {
+	switch {
+	case errors.Is(err, printer.ErrCanceled):
+		return trace.CancelStageQueued
+	case err != nil:
+		return trace.CancelStageAfterWriteFail
+	default:
+		return trace.CancelStageAfterWrite
+	}
+}
+
 // runPrintJob queues one ticket and waits for its result.
 //
-// The request context is checked twice. Before queueing, a canceled request is
-// dropped without touching the printer. After the job reply, the trace records
-// whether the client was gone while the ticket was in flight. The device write
-// itself is never interrupted: once a ticket has been sent it completes and
-// reports its real result, and the proxy never re-sends it on its own. The
-// returned bool reports a drop before queueing, in which case nothing was
-// printed and writing a response is pointless.
+// The request context is checked before queueing, again by the printer layer
+// after the device is open and before the first byte, and once more after the
+// job reply. Before the first byte a canceled request is dropped without
+// printing; after that the device write is never interrupted: once a ticket has
+// been sent it completes and reports its real result, and the proxy never
+// re-sends it on its own. The returned bool reports a drop before queueing, in
+// which case nothing was printed and writing a response is pointless.
 func runPrintJob(ctx context.Context, mgr *printer.Manager, printerID string, data []byte, tr *trace.Trace) (err error, droppedBeforeEnqueue bool) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		noteClientCanceled(tr, trace.CancelStageBeforeEnqueue, printerID, ctxErr)
@@ -424,11 +448,7 @@ func runPrintJob(ctx context.Context, mgr *printer.Manager, printerID string, da
 	}
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		stage := trace.CancelStageAfterWrite
-		if errors.Is(err, printer.ErrCanceled) {
-			stage = trace.CancelStageQueued
-		}
-		noteClientCanceled(tr, stage, printerID, ctxErr)
+		noteClientCanceled(tr, cancelStageFor(err), printerID, ctxErr)
 	}
 	return err, false
 }

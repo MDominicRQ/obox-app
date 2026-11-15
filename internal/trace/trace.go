@@ -50,13 +50,25 @@ const (
 //     was about to queue the job. Nothing reached the printer.
 //   - queued: the job had been queued but the device write had not started, so
 //     the job was skipped. Nothing reached the printer.
-//   - after_write: the ticket had already been written to the device when the
-//     client gave up. The ticket is printed and the proxy must not send it
-//     again; a new send can only come from a manual retry on the POS.
+//   - opening: the client canceled while the device connection was being opened
+//     (LAN dial or USB enumeration/claim) and before the first byte was written.
+//     The device was closed and nothing reached it.
+//   - after_write: the ticket was fully written to the device when the client
+//     gave up. The ticket is printed and the proxy must not send it again; a new
+//     send can only come from a manual retry on the POS.
+//   - after_write_failed: the job ended in a device error while the client was
+//     gone. The ticket may have been partially written; check `device_bytes`
+//     before assuming what came out of the printer.
+//
+// The first stage recorded wins, because it is the most precise observation:
+// a lower layer that saw the cancellation during the open must not be relabelled
+// as if the ticket had been written.
 const (
-	CancelStageBeforeEnqueue = "before_enqueue"
-	CancelStageQueued        = "queued"
-	CancelStageAfterWrite    = "after_write"
+	CancelStageBeforeEnqueue  = "before_enqueue"
+	CancelStageQueued         = "queued"
+	CancelStageOpening        = "opening"
+	CancelStageAfterWrite     = "after_write"
+	CancelStageAfterWriteFail = "after_write_failed"
 )
 
 // Image modes reported in the trace line.
@@ -204,9 +216,15 @@ func (t *Trace) SetFingerprint(fingerprint string) {
 // MarkClientCanceled records that the client abandoned the ticket at the given
 // stage. It does not change what the proxy sends to the device; it only makes
 // the abandoned job visible in the trace line.
+//
+// The first stage recorded wins, so a precise observation from the printer
+// layer (canceled while opening) is not overwritten later by a coarser one.
 func (t *Trace) MarkClientCanceled(stage string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.clientCanceled {
+		return
+	}
 	t.clientCanceled = true
 	t.cancelStage = stage
 }
@@ -216,6 +234,15 @@ func (t *Trace) ClientCanceled() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.clientCanceled
+}
+
+// DeviceBytes reports how many bytes the device accepted so far. It is zero
+// until the write path records a result, and it distinguishes "nothing was
+// written" from "a partial ticket may have reached the device" after a failure.
+func (t *Trace) DeviceBytes() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.deviceBytes
 }
 
 // SetImageMode records the image mode detected in the generated ESC/POS.

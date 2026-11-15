@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -708,4 +709,28 @@ func TestPrintData_SendsEachTicketOnce(t *testing.T) {
 	}
 
 	testutil.ExpectedEqual(t, int(connections.Load()), 1)
+}
+
+// TestCancelStageFor pins the labelling rule: a job that ended in a device
+// error must never be reported as if the ticket had been written.
+func TestCancelStageFor(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"dropped before the device", fmt.Errorf("%w: context canceled", printer.ErrCanceled), trace.CancelStageQueued},
+		{"device write failed", errors.New("device write failed"), trace.CancelStageAfterWriteFail},
+		{"successful write", nil, trace.CancelStageAfterWrite},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cancelStageFor(tc.err)
+			testutil.ExpectedEqual(t, got, tc.want)
+			if tc.err != nil && got == trace.CancelStageAfterWrite {
+				t.Fatalf("a failed job must not be labelled %q", trace.CancelStageAfterWrite)
+			}
+		})
+	}
 }
