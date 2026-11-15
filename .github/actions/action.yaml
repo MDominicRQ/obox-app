@@ -195,10 +195,13 @@ runs:
                     CGO_LDFLAGS: "-L/mingw64/lib -lusb-1.0 -static -lsetupapi"
 
                 # Run automated tests before release (stop build if any test fails)
+                # Package tests one at a time: internal/printer and internal/server
+                # both bind the fixed LAN printer port 9100, so running the two
+                # package binaries in parallel makes one wait on the other's socket.
                 - name: Run Tests (Linux / macOS)
                   if: inputs.build == 'true' && runner.os != 'Windows'
                   working-directory: ${{ inputs.app-working-directory }}
-                  run: go test -v ./...
+                  run: go test -p 1 -v ./...
                   shell: bash
 
                 - name: Run Tests (Windows)
@@ -207,7 +210,7 @@ runs:
                   shell: msys2 {0}
                   run: |
                     export PATH="$PATH:/c/Users/runneradmin/go/bin:$GO_BIN"
-                    go test -v ./...
+                    go test -p 1 -v ./...
                   env:
                     CGO_ENABLED: "1"
                     CGO_CFLAGS: "-I/mingw64/include/libusb-1.0"
