@@ -33,8 +33,12 @@ func TestMacOSGuideDocumentsFirefoxMatrix(t *testing.T) {
 		"LAN HTTPS / LNA OFF",
 		// The reset in initLNA() happens after the printers are created.
 		"Use Local Network Access",
+		"point_of_sale.use_lna",
+		"System Parameters",
 		"mixed content",
+		"potentially trustworthy",
 		"https://127.0.0.1:4645/",
+		"snapshot",
 		odoo19Commit,
 		"| F1 |",
 		"| F2 |",
@@ -45,6 +49,7 @@ func TestMacOSGuideDocumentsFirefoxMatrix(t *testing.T) {
 		"| F7 |",
 		"| F8 |",
 		"| F9 |",
+		"| F10 |",
 	}
 
 	for _, want := range required {

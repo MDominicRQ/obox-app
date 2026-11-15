@@ -12,8 +12,10 @@ import (
 // and re-check the matrix instead of only editing this constant.
 const odoo19Commit = "a157617c921669c5c036509b341be6a07ad1069d"
 
-// TestOdoo19SourceContract keeps the model anchored to the real upstream code
-// rather than to a free-standing specification. The fixtures are verbatim
+// TestOdoo19SourceContract keeps the model anchored to a pinned snapshot of
+// the real upstream code rather than to a free-standing specification. It does
+// not query github.com: a change in Odoo is only detected after the fixtures
+// are re-fetched following testdata/odoo19/README.md. The fixtures are verbatim
 // excerpts of odoo/odoo (LGPL-3.0) pinned at odoo19Commit.
 func TestOdoo19SourceContract(t *testing.T) {
 	read := func(name string) string {

@@ -159,50 +159,97 @@ func TestClassifyRejectsUnknownSchemes(t *testing.T) {
 		if _, err := Classify(tc.page, false, tc.address); err == nil {
 			t.Fatalf("Classify(%q, false, %q) accepted an invalid scheme", tc.page, tc.address)
 		}
-		if _, err := ClassifyAtLoad(Firefox, true, tc.page, tc.address); err == nil {
-			t.Fatalf("ClassifyAtLoad(Firefox, true, %q, %q) accepted an invalid scheme", tc.page, tc.address)
+		target := Target{Address: "127.0.0.1:4545/p/printer", Scheme: tc.address}
+		if _, err := ClassifyAtLoad(Firefox, true, tc.page, target); err == nil {
+			t.Fatalf("ClassifyAtLoad(Firefox, true, %q, %+v) accepted an invalid scheme", tc.page, target)
 		}
 	}
 }
 
-// TestClassifyAtLoad covers row F9 plus the controls that prove the difference
-// between the load-time state and the steady state. Odoo builds the printer URL
-// in EpsonPrinter.setup(), which runs before initLNA() can clear odoo.use_lna.
+func TestClassifyHost(t *testing.T) {
+	cases := []struct {
+		address string
+		want    HostClass
+	}{
+		{"127.0.0.1:4545/p/printer-id", Loopback},
+		{"127.0.0.2:4545/p/printer-id", Loopback},
+		{"127.1.2.3:4645/p/printer-id", Loopback},
+		{"localhost:4545/p/printer-id", Loopback},
+		{"LOCALHOST:4545", Loopback},
+		{"[::1]:4545/p/printer-id", Loopback},
+		{"::1", Loopback},
+		{"127.0.0.1", Loopback},
+		{"192.168.1.77:4545/p/printer-id", LAN},
+		{"10.0.0.5:4645/p/printer-id", LAN},
+		{"172.16.4.2:4545/p/printer-id", LAN},
+		{"[fd00::1]:4545/p/printer-id", LAN},
+		{"epos.local:4545/p/printer-id", LAN},
+		{"", LAN},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.address, func(t *testing.T) {
+			if got := ClassifyHost(tc.address); got != tc.want {
+				t.Fatalf("ClassifyHost(%q) = %q, want %q", tc.address, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClassifyAtLoad covers the load-time state, where Odoo builds the printer
+// URL in EpsonPrinter.setup() before initLNA() can clear odoo.use_lna. Mixed
+// content is decided per host: browsers treat loopback as potentially
+// trustworthy, so F9 must be split from the LAN case.
 func TestClassifyAtLoad(t *testing.T) {
+	const (
+		localHTTP  = "127.0.0.1:4545/p/printer-id"
+		localHTTPS = "127.0.0.1:4645/p/printer-id"
+		lanHTTP    = "192.168.1.77:4545/p/printer-id"
+		lanHTTPS   = "192.168.1.77:4645/p/printer-id"
+	)
+
 	cases := []struct {
 		name          string
 		browser       Browser
 		configuredLNA bool
 		pageScheme    string
+		address       string
 		addressScheme string
 		want          Outcome
 	}{
-		// F9: the reported Firefox failure mode. Odoo still has use_lna=true at
-		// construction time, builds http://, and Firefox blocks it as mixed
-		// content whatever address was copied.
-		{"F9 firefox https page with LNA enabled and HTTP address", Firefox, true, HTTPS, HTTP, OutcomeMixedContent},
-		{"F9 firefox https page with LNA enabled and HTTPS address", Firefox, true, HTTPS, HTTPS, OutcomeMixedContent},
-		{"F9 safari https page with LNA enabled", Safari, true, HTTPS, HTTP, OutcomeMixedContent},
+		// F9: LNA still enabled at construction time on an HTTPS page. Loopback
+		// is potentially trustworthy, so the http:// request is not blocked and
+		// the listener scheme decides the outcome.
+		{"F9 firefox local HTTP stays allowed", Firefox, true, HTTPS, localHTTP, HTTP, OutcomeOK},
+		{"F9 safari local HTTP stays allowed", Safari, true, HTTPS, localHTTP, HTTP, OutcomeOK},
+		{"F9 firefox local HTTPS reaches plaintext check", Firefox, true, HTTPS, localHTTPS, HTTPS, OutcomePlaintextOnTLS},
+		// F10: a LAN address is not potentially trustworthy, so the same http://
+		// URL is blocked as mixed content before any connection.
+		{"F10 firefox LAN HTTP is blocked", Firefox, true, HTTPS, lanHTTP, HTTP, OutcomeMixedContent},
+		{"F10 firefox LAN HTTPS is blocked", Firefox, true, HTTPS, lanHTTPS, HTTPS, OutcomeMixedContent},
+		{"F10 safari LAN HTTP is blocked", Safari, true, HTTPS, lanHTTP, HTTP, OutcomeMixedContent},
 		// With LNA disabled, which is the documented setting for Firefox and
 		// Safari, the page scheme wins again.
-		{"F6 firefox https page with LNA disabled", Firefox, false, HTTPS, HTTPS, OutcomeCARequired},
-		{"F5 firefox https page with LNA disabled and HTTP address", Firefox, false, HTTPS, HTTP, OutcomeTLSOnPlaintext},
-		{"F1 firefox http page with LNA enabled", Firefox, true, HTTP, HTTP, OutcomeOK},
+		{"F6 firefox LAN https with LNA disabled", Firefox, false, HTTPS, lanHTTPS, HTTPS, OutcomeCARequired},
+		{"F5 firefox LAN http with LNA disabled", Firefox, false, HTTPS, lanHTTP, HTTP, OutcomeTLSOnPlaintext},
+		{"F1 firefox http page with LNA enabled", Firefox, true, HTTP, lanHTTP, HTTP, OutcomeOK},
 		// Chromium keeps LNA, so it is allowed to call the HTTP port from an
-		// HTTPS page; nothing is mixed content there.
-		{"C2 chromium https page with LNA enabled", Chromium, true, HTTPS, HTTP, OutcomeOK},
-		{"C3 chromium https page with LNA enabled and HTTPS address", Chromium, true, HTTPS, HTTPS, OutcomePlaintextOnTLS},
-		{"C4 chromium https page with LNA disabled", Chromium, false, HTTPS, HTTPS, OutcomeCARequired},
+		// HTTPS page for both host classes; nothing is mixed content there.
+		{"C2 chromium LAN http with LNA enabled", Chromium, true, HTTPS, lanHTTP, HTTP, OutcomeOK},
+		{"C2 chromium local http with LNA enabled", Chromium, true, HTTPS, localHTTP, HTTP, OutcomeOK},
+		{"C3 chromium LAN https with LNA enabled", Chromium, true, HTTPS, lanHTTPS, HTTPS, OutcomePlaintextOnTLS},
+		{"C4 chromium LAN https with LNA disabled", Chromium, false, HTTPS, lanHTTPS, HTTPS, OutcomeCARequired},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ClassifyAtLoad(tc.browser, tc.configuredLNA, tc.pageScheme, tc.addressScheme)
+			target := Target{Address: tc.address, Scheme: tc.addressScheme}
+			got, err := ClassifyAtLoad(tc.browser, tc.configuredLNA, tc.pageScheme, target)
 			if err != nil {
-				t.Fatalf("ClassifyAtLoad(%q, %v, %q, %q): %v", tc.browser, tc.configuredLNA, tc.pageScheme, tc.addressScheme, err)
+				t.Fatalf("ClassifyAtLoad(%q, %v, %q, %+v): %v", tc.browser, tc.configuredLNA, tc.pageScheme, target, err)
 			}
 			if got != tc.want {
-				t.Fatalf("ClassifyAtLoad(%q, %v, %q, %q) = %q, want %q", tc.browser, tc.configuredLNA, tc.pageScheme, tc.addressScheme, got, tc.want)
+				t.Fatalf("ClassifyAtLoad(%q, %v, %q, %+v) = %q, want %q", tc.browser, tc.configuredLNA, tc.pageScheme, target, got, tc.want)
 			}
 		})
 	}
