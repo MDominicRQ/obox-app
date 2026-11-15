@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,30 +19,40 @@ import (
 	"epos-proxy/internal/trace"
 )
 
-// collectMockPrinter returns a channel that receives every payload the mock
-// device reads. Empty connections are ignored, so a test can assert that no
-// ticket bytes reached the device.
-func collectMockPrinter(t *testing.T) <-chan []byte {
-	t.Helper()
-	received := make(chan []byte, 4)
-	_, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
-		defer conn.Close()
-		payload, _ := io.ReadAll(conn)
-		if len(payload) > 0 {
-			received <- payload
-		}
-	})
-	testutil.ExpectedNoError(t, err)
-	return received
+// recordingConn is an in-memory LAN device. Tests use it instead of binding the
+// fixed LAN port, so this package does not compete with the server package when
+// `go test ./...` runs both in parallel.
+type recordingConn struct {
+	mu     sync.Mutex
+	writes int
+	bytes  []byte
 }
 
-func expectNoPayload(t *testing.T, received <-chan []byte) {
-	t.Helper()
-	select {
-	case payload := <-received:
-		t.Fatalf("device received %d bytes, want none: %q", len(payload), payload)
-	case <-time.After(250 * time.Millisecond):
-	}
+func (c *recordingConn) Read([]byte) (int, error) { return 0, io.EOF }
+func (c *recordingConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writes++
+	c.bytes = append(c.bytes, p...)
+	return len(p), nil
+}
+func (c *recordingConn) Close() error                     { return nil }
+func (c *recordingConn) LocalAddr() net.Addr              { return fakeAddr{} }
+func (c *recordingConn) RemoteAddr() net.Addr             { return fakeAddr{} }
+func (c *recordingConn) SetDeadline(time.Time) error      { return nil }
+func (c *recordingConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *recordingConn) SetWriteDeadline(time.Time) error { return nil }
+
+func (c *recordingConn) received() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.bytes)
+}
+
+func (c *recordingConn) writeCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writes
 }
 
 // registerExistingPrinter puts a printer under the manager cache without
@@ -51,10 +63,16 @@ func registerExistingPrinter(mgr *Manager, printerID string, p *Printer) {
 }
 
 func TestWriteAsyncContextSkipsCanceledJobBeforeDeviceWrite(t *testing.T) {
-	received := collectMockPrinter(t)
-
 	mgr := NewManager()
 	printerID := EncodeLANPrinterID("127.0.0.1")
+	conn := &recordingConn{}
+	registerExistingPrinter(mgr, printerID, &Printer{
+		connectionType: ConnKindLAN,
+		lanIP:          "127.0.0.1",
+		tcpConn:        conn,
+		jobs:           make(chan Job, QueueSize),
+	})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -63,7 +81,8 @@ func TestWriteAsyncContextSkipsCanceledJobBeforeDeviceWrite(t *testing.T) {
 	testutil.ExpectedTrue(t, errors.Is(err, ErrCanceled), "expected ErrCanceled, got "+fmt.Sprint(err))
 	testutil.ExpectedTrue(t, reply == nil, "a request canceled before queueing must not return a reply channel")
 
-	expectNoPayload(t, received)
+	testutil.ExpectedEqual(t, conn.writeCount(), 0)
+	testutil.ExpectedLen(t, conn.received(), 0)
 
 	line := tr.Line()
 	testutil.ExpectedContains(t, line, "client_canceled=true")
@@ -72,12 +91,12 @@ func TestWriteAsyncContextSkipsCanceledJobBeforeDeviceWrite(t *testing.T) {
 }
 
 func TestWriteAsyncContextSkipsJobCanceledWhileQueued(t *testing.T) {
-	received := collectMockPrinter(t)
-
 	mgr := NewManager()
 	printerID := EncodeLANPrinterID("127.0.0.1")
-	p, err := mgr.Get(printerID)
-	testutil.ExpectedNoError(t, err)
+	conn := &recordingConn{}
+	p := &Printer{connectionType: ConnKindLAN, lanIP: "127.0.0.1", tcpConn: conn, jobs: make(chan Job, QueueSize)}
+	registerExistingPrinter(mgr, printerID, p)
+	t.Cleanup(func() { p.close() })
 
 	release := make(chan struct{})
 	started := make(chan struct{})
@@ -103,7 +122,8 @@ func TestWriteAsyncContextSkipsJobCanceledWhileQueued(t *testing.T) {
 		t.Fatal("timed out waiting for the queued job reply")
 	}
 
-	expectNoPayload(t, received)
+	testutil.ExpectedEqual(t, conn.writeCount(), 0)
+	testutil.ExpectedLen(t, conn.received(), 0)
 	testutil.ExpectedContains(t, tr.Line(), "cancel_stage="+trace.CancelStageQueued)
 }
 
