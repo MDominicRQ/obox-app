@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/testutil"
 )
 
@@ -160,6 +161,11 @@ func TestLineUsesRawImageModeForLabels(t *testing.T) {
 }
 
 func TestDetectImageMode(t *testing.T) {
+	legacyThenGSL := []byte{
+		0x1D, 0x76, 0x30, 0x00, 0x03, 0x00, 0x01, 0x00, // GS v 0, 3 bytes/row, 1 row
+		0x1D, 0x28, 0x4C, // bitmap payload that looks like a GS ( L signature
+		0x1D, 0x28, 0x4C, 0x0A, 0x00, 0x30, 0x70, 0x30, 0x01, 0x01, 0x31, 0x18, 0x00, 0x01, 0x00, // GS ( L store
+	}
 	tests := []struct {
 		name string
 		job  []byte
@@ -167,9 +173,12 @@ func TestDetectImageMode(t *testing.T) {
 	}{
 		{name: "no image", job: []byte("plain text"), want: ImageModeNone},
 		{name: "empty", job: nil, want: ImageModeNone},
-		{name: "legacy GS v 0", job: []byte{0x1D, 0x76, 0x30, 0x00, 0x01, 0x00, 0x02, 0x00}, want: ImageModeLegacy},
-		{name: "Epson GS ( L", job: []byte{0x1D, 0x28, 0x4C, 0x1E, 0x30, 0x70}, want: ImageModeGSL},
-		{name: "both prefers GS ( L", job: []byte{0x1D, 0x76, 0x30, 0x00, 0x1D, 0x28, 0x4C}, want: ImageModeGSL},
+		{name: "legacy GS v 0", job: []byte{0x1D, 0x76, 0x30, 0x00, 0x01, 0x00, 0x02, 0x00, 0xFF, 0xFF}, want: ImageModeLegacy},
+		{name: "Epson GS ( L store", job: []byte{0x1D, 0x28, 0x4C, 0x0A, 0x00, 0x30, 0x70, 0x30, 0x01, 0x01, 0x31, 0x18, 0x00, 0x01, 0x00}, want: ImageModeGSL},
+		{name: "Epson GS ( L print", job: []byte{0x1D, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32}, want: ImageModeGSL},
+		{name: "legacy payload contains GS ( L bytes", job: []byte{0x1D, 0x76, 0x30, 0x00, 0x03, 0x00, 0x01, 0x00, 0x1D, 0x28, 0x4C}, want: ImageModeLegacy},
+		{name: "both prefers GS ( L", job: legacyThenGSL, want: ImageModeGSL},
+		{name: "truncated GS ( L is ignored", job: []byte{0x1D, 0x28, 0x4C, 0x1E, 0x30, 0x70}, want: ImageModeNone},
 	}
 
 	for _, tc := range tests {
@@ -177,6 +186,16 @@ func TestDetectImageMode(t *testing.T) {
 			testutil.ExpectedEqual(t, DetectImageMode(tc.job), tc.want)
 		})
 	}
+}
+
+// TestDetectImageModeParsedLegacyBitmap reproduces the Tech Lead regression
+// case: the bitmap bytes of a legacy GS v 0 ticket contain 1D 28 4C, which must
+// not be mistaken for an Epson GS ( L command.
+func TestDetectImageModeParsedLegacyBitmap(t *testing.T) {
+	jobData, err := escpos.ParseXML([]byte(`<epos-print><image width="24" height="1">HShM</image></epos-print>`))
+	testutil.ExpectedNoError(t, err)
+
+	testutil.ExpectedEqual(t, DetectImageMode(jobData), ImageModeLegacy)
 }
 
 func TestRasterSize(t *testing.T) {

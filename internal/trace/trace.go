@@ -31,8 +31,9 @@ import (
 
 // Transport values reported in the trace line.
 const (
-	TransportUSB = "usb"
-	TransportLAN = "lan"
+	TransportUSB  = "usb"
+	TransportLAN  = "lan"
+	TransportCUPS = "cups"
 )
 
 // Kind values reported in the trace line.
@@ -54,14 +55,15 @@ const (
 	ImageModeRaw    = "raw"
 )
 
-// SettleTimeout bounds how long the HTTP handler waits for the printer loop to
-// finish its per-ticket device close before the trace line is written.
+// SettleTimeout bounds how long the trace emission goroutine waits for the
+// printer loop to finish its per-ticket device close before the line is logged.
 //
 // The close itself is measured after the job result is handed back, so the wait
 // only covers the close decision, which is normally microseconds: a ticket that
 // drained the queue closes the device, a ticket that left work queued reports
-// close_done=false immediately. The bound exists so a stuck close cannot block
-// the handler; the response has already been written when the wait starts.
+// close_done=false immediately. The bound keeps a stuck close from delaying the
+// trace line indefinitely. The HTTP handler has already returned when the wait
+// starts, so the client response is never blocked.
 const SettleTimeout = 250 * time.Millisecond
 
 const (
@@ -72,11 +74,6 @@ const (
 	statusError      = "error"
 	traceLinePrefix  = "print_trace"
 	requestIDEntropy = 8
-)
-
-var (
-	gsLSequence  = []byte{0x1D, 0x28, 0x4C} // GS ( L – Epson graphics
-	gsV0Sequence = []byte{0x1D, 0x76, 0x30} // GS v 0 – raster bit image
 )
 
 var fallbackID atomic.Uint64
@@ -430,17 +427,93 @@ func hasAlphanumeric(value string) bool {
 }
 
 // DetectImageMode inspects the generated ESC/POS stream and reports which
-// raster command carries the ticket image. Detecting the mode from the bytes
+// raster command carries the ticket image. It walks the command stream and
+// skips every raster payload by its declared length, so bitmap bytes that
+// happen to contain a command signature (for example 1D 28 4C inside a GS v 0
+// image) cannot change the classification. Detecting the mode from the bytes
 // rather than from configuration keeps the trace correct when a new image mode
 // is added: the trace follows the bytes that are actually sent.
 func DetectImageMode(jobData []byte) string {
-	if bytes.Contains(jobData, gsLSequence) {
-		return ImageModeGSL
+	foundLegacy := false
+	for i := 0; i < len(jobData); {
+		switch jobData[i] {
+		case 0x1D: // GS
+			switch {
+			case i+8 <= len(jobData) && jobData[i+1] == 0x76 && jobData[i+2] == 0x30:
+				if end, ok := legacyRasterEnd(jobData, i); ok {
+					foundLegacy = true
+					i = end
+					continue
+				}
+			case i+7 <= len(jobData) && jobData[i+1] == 0x28 && jobData[i+2] == 0x4C:
+				if _, ok := epsonGraphicsEnd(jobData, i); ok {
+					return ImageModeGSL
+				}
+			}
+		case 0x1B: // ESC: skip the argument bytes of the commands we emit.
+			if i+1 < len(jobData) {
+				i += escapeCommandLen(jobData[i+1])
+				continue
+			}
+		}
+		i++
 	}
-	if bytes.Contains(jobData, gsV0Sequence) {
+	if foundLegacy {
 		return ImageModeLegacy
 	}
 	return ImageModeNone
+}
+
+// legacyRasterEnd validates a GS v 0 header at start and returns the offset
+// just past its raster payload.
+func legacyRasterEnd(data []byte, start int) (int, bool) {
+	if data[start+3] > 3 { // density must be one of the four defined modes
+		return 0, false
+	}
+	bytesPerRow := int(data[start+4]) | int(data[start+5])<<8
+	rows := int(data[start+6]) | int(data[start+7])<<8
+	if bytesPerRow == 0 || rows == 0 {
+		return 0, false
+	}
+	end := int64(start+8) + int64(bytesPerRow)*int64(rows)
+	if end > int64(len(data)) {
+		return 0, false
+	}
+	return int(end), true
+}
+
+// epsonGraphicsEnd validates a GS ( L store (112) or print (50) command at
+// start and returns the offset just past its payload.
+func epsonGraphicsEnd(data []byte, start int) (int, bool) {
+	size := int(data[start+3]) | int(data[start+4])<<8
+	if size < 2 || data[start+5] != 0x30 { // m = 0x30 for graphics functions
+		return 0, false
+	}
+	end := start + 5 + size
+	if end > len(data) {
+		return 0, false
+	}
+	switch data[start+6] {
+	case 0x70, 0x32: // fn=112 store, fn=50 print
+		return end, true
+	}
+	return 0, false
+}
+
+// escapeCommandLen returns the byte length of the ESC commands emitted by the
+// proxy. Unknown ESC sequences are skipped as two-byte commands, which is
+// enough to avoid treating their arguments as raster headers.
+func escapeCommandLen(code byte) int {
+	switch code {
+	case 0x40: // ESC @ initialize
+		return 2
+	case 0x61, 0x4D, 0x45, 0x2D, 0x3D: // align, font, emphasis, underline, drawer
+		return 3
+	case 0x70: // ESC p drawer pulse
+		return 5
+	default:
+		return 2
+	}
 }
 
 // RasterSize reports the raster dimensions requested by the ePOS XML: the
