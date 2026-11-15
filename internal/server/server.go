@@ -366,14 +366,20 @@ func printTransport(printerID string) string {
 	return trace.TransportUSB
 }
 
-// finishTrace completes and emits the ticket line. It runs after the response
-// was written, so waiting for the device close never delays Odoo.
+// finishTrace completes the ticket line and emits it off the request path.
+//
+// net/http may buffer a small response until the handler returns, so waiting
+// for the device close in the handler would delay the response Odoo reads.
+// Settling in a goroutine keeps the client latency identical to the
+// non-instrumented build; the goroutine is bounded by SettleTimeout.
 func finishTrace(tr *trace.Trace, code string, jobErr error) {
 	tr.SetCode(code)
 	tr.SetError(jobErr)
 	tr.SetTotal(time.Since(tr.RecvAt()))
-	tr.Settle(trace.SettleTimeout)
-	tr.Log()
+	go func() {
+		tr.Settle(trace.SettleTimeout)
+		tr.Log()
+	}()
 }
 
 func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string) {

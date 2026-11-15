@@ -17,6 +17,7 @@ import (
 	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/printer"
 	"epos-proxy/internal/testutil"
+	"epos-proxy/internal/trace"
 )
 
 func testResponse(s *Server, req *http.Request) (*http.Response, error) {
@@ -578,4 +579,19 @@ func TestPrintTransport(t *testing.T) {
 	testutil.ExpectedEqual(t, printTransport(printer.EncodeLANPrinterID("192.168.1.50")), "lan")
 	testutil.ExpectedEqual(t, printTransport("czpOT05fRVhJU1RFTlRfU0VSSUFMCg"), "usb")
 	testutil.ExpectedEqual(t, printTransport(""), "usb")
+}
+
+func TestFinishTraceDoesNotBlockHandler(t *testing.T) {
+	tr := trace.New("req-async", "LAN:127.0.0.1", trace.TransportLAN, trace.KindReceipt)
+	tr.MarkQueued()
+
+	started := time.Now()
+	finishTrace(tr, "", nil)
+	elapsed := time.Since(started)
+
+	if elapsed >= 150*time.Millisecond {
+		t.Fatalf("finishTrace blocked the handler for %s; it must settle off the request path", elapsed)
+	}
+
+	tr.Finish()
 }

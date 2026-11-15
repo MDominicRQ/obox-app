@@ -28,6 +28,14 @@ changes the ESC/POS bytes, the order of device operations, or the ePOS response.
 `TestPrintData_DeviceBytesMatchEscposOutput` and
 `TestWriteTracedKeepsDeviceBytesIdentical` enforce that guarantee.
 
+The line is emitted from a goroutine after the response is written, because
+`net/http` may buffer a small response until the handler returns. The
+`request_id` response header is set before any printing starts, so a client can
+read it as soon as the response arrives. Consequence: a `print_trace` line may
+appear in the log *after* the matching `Proxy request` line, and up to
+`SettleTimeout` (250 ms) later if the device close is slow. Correlate by
+`request_id`, not by line order.
+
 ### Log file
 
 One `print_trace` line is written per ticket at `info` level, so it is enabled in
@@ -131,6 +139,10 @@ Printer ids are the same identifiers the app already shows in its UI.
   counting physical receipts reveals it.
 - **Browser-side rendering**: `xml_bytes` and `raster_h` tell you whether
   Firefox and Chrome produced the same ticket, not why.
+- **Transport on a CUPS build**: `transport` is derived from the printer id and
+  on `main` only distinguishes USB from LAN. The CUPS branch (PR #4) must map
+  its own transport (or reuse `lan`) before merging, otherwise a CUPS ticket is
+  reported as `lan` while `cups_lp_ms`/`cups_drain_ms` are set.
 
 ## 3. Benchmark protocol
 
