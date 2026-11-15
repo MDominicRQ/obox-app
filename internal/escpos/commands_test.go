@@ -314,22 +314,37 @@ func TestBuildImage_DataHandling(t *testing.T) {
 	}
 	testutil.ExpectedBytesEqual(t, got, expectedPrefix)
 
-	// Image data larger than one slice is split into multiple chunks.
-	bitmap = make([]byte, 300)
+	// Image data larger than one slice is split into multiple chunks. The
+	// assertion follows maxImgSliceHeight instead of hardcoding the slice
+	// size, so the test keeps describing the contract when the limit changes.
+	tailRows := 45
+	height := maxImgSliceHeight + tailRows
+	bitmap = make([]byte, height)
 	for i := range bitmap {
 		bitmap[i] = byte(i % 256)
 	}
 	b64 = base64.StdEncoding.EncodeToString(bitmap)
 
-	got, err = BuildImage(b64, ImageAttrs{Width: 8, Height: 300})
+	got, err = BuildImage(b64, ImageAttrs{Width: 8, Height: height})
 	testutil.ExpectedNoError(t, err)
-	testutil.ExpectedLen(t, got, 316)
+	testutil.ExpectedLen(t, got, height+2*8)
 
-	// Verify Chunk 1 header
-	testutil.ExpectedBytesEqual(t, got[:8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0xFF, 0x00})
+	// Verify Chunk 1 header and payload.
+	testutil.ExpectedBytesEqual(t, got[:8], []byte{
+		GS, 0x76, 0x30, 0x00,
+		0x01, 0x00, // xL=1, xH=0
+		byte(maxImgSliceHeight & 0xFF), byte(maxImgSliceHeight >> 8),
+	})
+	testutil.ExpectedBytesEqual(t, got[8:8+maxImgSliceHeight], bitmap[:maxImgSliceHeight])
 
-	// Verify Chunk 2 header (0x2D = 45)
-	testutil.ExpectedBytesEqual(t, got[263:263+8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0x2D, 0x00})
+	// Verify Chunk 2 header and payload.
+	secondHeader := 8 + maxImgSliceHeight
+	testutil.ExpectedBytesEqual(t, got[secondHeader:secondHeader+8], []byte{
+		GS, 0x76, 0x30, 0x00,
+		0x01, 0x00, // xL=1, xH=0
+		byte(tailRows & 0xFF), byte(tailRows >> 8),
+	})
+	testutil.ExpectedBytesEqual(t, got[secondHeader+8:], bitmap[maxImgSliceHeight:])
 }
 
 func TestBuildImage_RejectsUnsafeDimensions(t *testing.T) {
