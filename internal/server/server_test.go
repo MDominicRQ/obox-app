@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"epos-proxy/internal/certs"
+	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/printer"
 	"epos-proxy/internal/testutil"
 )
@@ -227,7 +228,6 @@ func TestPrintData_AutoSelectRoute(t *testing.T) {
 		})
 	}
 }
-
 
 func TestPrinterBaseRouteIsBrowserTestable(t *testing.T) {
 	port := testutil.GetFreePort(t)
@@ -466,4 +466,116 @@ func TestPrintData_InvalidImageDimensions_ReturnsSchemaError(t *testing.T) {
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedContains(t, string(body), `success="false"`)
 	testutil.ExpectedContains(t, string(body), `code="SchemaError"`)
+}
+
+// completeTicket exercises every element the proxy can rasterise, so the byte
+// comparison below covers text, feed, image, cut and pulse.
+const completeTicket = `<epos-print>
+<text align="center" em="true">ORDER #42</text>
+<feed line="2" />
+<image width="8" height="2">qlU=</image>
+<cut />
+<pulse drawer="drawer_1" time="pulse_100" />
+</epos-print>`
+
+func startCapturePrinter(t *testing.T) <-chan []byte {
+	t.Helper()
+	received := make(chan []byte, 1)
+	_, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
+		defer conn.Close()
+		payload, _ := io.ReadAll(conn)
+		received <- payload
+	})
+	testutil.ExpectedNoError(t, err)
+	return received
+}
+
+func TestPrintData_DeviceBytesMatchEscposOutput(t *testing.T) {
+	received := startCapturePrinter(t)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	printerID := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", printerID), bytes.NewReader([]byte(completeTicket)))
+	req.Header.Set("Content-Type", "text/xml")
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `success="true"`)
+
+	expected, err := escpos.ParseXML([]byte(completeTicket))
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedTrue(t, bytes.Contains(expected, escpos.CmdCut), "expected ESC/POS output to contain the cut command")
+
+	select {
+	case captured := <-received:
+		testutil.ExpectedBytesEqual(t, captured, expected, "instrumentation must not alter the ESC/POS stream")
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the mock printer payload")
+	}
+
+	if id := resp.Header.Get(requestIDHeader); len(id) != 2*8 {
+		t.Errorf("expected a generated request id on the response, got %q", id)
+	}
+}
+
+func TestPrintData_EchoesClientRequestID(t *testing.T) {
+	received := startCapturePrinter(t)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	printerID := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", printerID), bytes.NewReader([]byte(completeTicket)))
+	req.Header.Set("Content-Type", "text/xml")
+	req.Header.Set(requestIDHeader, "bench-short-01")
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedEqual(t, resp.Header.Get(requestIDHeader), "bench-short-01")
+
+	select {
+	case <-received:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the mock printer payload")
+	}
+}
+
+func TestPrintData_UnusableRequestIDIsReplaced(t *testing.T) {
+	received := startCapturePrinter(t)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	printerID := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", printerID), bytes.NewReader([]byte(completeTicket)))
+	req.Header.Set("Content-Type", "text/xml")
+	req.Header.Set(requestIDHeader, "   ")
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	if id := resp.Header.Get(requestIDHeader); id == "" || id == "   " {
+		t.Errorf("expected a generated request id, got %q", id)
+	}
+
+	select {
+	case <-received:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the mock printer payload")
+	}
+}
+
+func TestPrintTransport(t *testing.T) {
+	testutil.ExpectedEqual(t, printTransport(printer.EncodeLANPrinterID("192.168.1.50")), "lan")
+	testutil.ExpectedEqual(t, printTransport("czpOT05fRVhJU1RFTlRfU0VSSUFMCg"), "usb")
+	testutil.ExpectedEqual(t, printTransport(""), "usb")
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"epos-proxy/internal/logger"
+	"epos-proxy/internal/trace"
 
 	"github.com/google/gousb"
 )
@@ -42,6 +43,7 @@ type JobFunc func(p *Printer) JobResult
 type Job struct {
 	run   JobFunc
 	reply chan JobResult
+	trace *trace.Trace
 }
 
 // Printer owns a single device connection and serialises writes to it
@@ -95,7 +97,13 @@ func newPrinter(id string) (*Printer, error) {
 }
 
 func (p *Printer) Enqueue(fn JobFunc, reply chan JobResult) error {
-	j := Job{run: fn, reply: reply}
+	return p.EnqueueTraced(fn, reply, nil)
+}
+
+// EnqueueTraced queues a job and attaches its per-ticket trace. A nil trace
+// keeps the historical behaviour.
+func (p *Printer) EnqueueTraced(fn JobFunc, reply chan JobResult, tr *trace.Trace) error {
+	j := Job{run: fn, reply: reply, trace: tr}
 	select {
 	case p.jobs <- j:
 		logger.Debugf("Enqueued print job for printer %s", p.idToString())
@@ -106,22 +114,42 @@ func (p *Printer) Enqueue(fn JobFunc, reply chan JobResult) error {
 	}
 }
 
+// Write sends the job to the device without a trace. Callers that need
+// timings use the manager, which passes a trace down to write.
 func (p *Printer) Write(data []byte) error {
+	return p.write(data, nil)
+}
+
+func (p *Printer) write(data []byte, tr *trace.Trace) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.ensureOpen(); err != nil {
-		return err
+
+	reused := p.deviceOpenLocked()
+	openStarted := time.Now()
+	openErr := p.ensureOpen()
+	if tr != nil {
+		tr.MarkOpen(time.Since(openStarted), reused)
+	}
+	if openErr != nil {
+		return openErr
 	}
 
 	logger.Debugf("Writing %d bytes to printer %s", len(data), p.idToString())
 
 	if p.connectionType == ConnKindLAN {
 		if err := p.tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-			p.closeDeviceLocked()
+			p.closeDeviceTraced(tr)
 			return fmt.Errorf("failed to set write deadline for LAN printer %s: %w", p.idToString(), err)
 		}
-		if _, err := p.tcpConn.Write(data); err != nil {
-			p.closeDeviceLocked()
+		writeStarted := time.Now()
+		written, err := p.tcpConn.Write(data)
+		writeDur := time.Since(writeStarted)
+		if tr != nil {
+			tr.AddWriteBlock(writeDur)
+			tr.SetWrite(writeDur, len(data), written)
+		}
+		if err != nil {
+			p.closeDeviceTraced(tr)
 			return fmt.Errorf("failed to write to LAN printer %s: %w", p.idToString(), err)
 		}
 		logger.Debugf("Successfully wrote to LAN printer %s", p.idToString())
@@ -129,22 +157,57 @@ func (p *Printer) Write(data []byte) error {
 	}
 
 	// USB write
+	totalBytes := len(data)
+	written := 0
+	writeStarted := time.Now()
 	for len(data) > 0 {
 		size := min(len(data), ChunkSize)
 		logger.Debugf("USB printer %s writing %d bytes", p.idToString(), size)
 
 		ctx, cancel := context.WithTimeout(context.Background(), WriteTimeout)
-		_, err := p.outEndpoint.WriteContext(ctx, data[:size])
+		blockStarted := time.Now()
+		n, err := p.outEndpoint.WriteContext(ctx, data[:size])
+		blockDur := time.Since(blockStarted)
 		cancel()
 
+		written += n
+		if tr != nil {
+			tr.AddWriteBlock(blockDur)
+		}
+
 		if err != nil {
-			p.closeDeviceLocked()
+			if tr != nil {
+				tr.SetWrite(time.Since(writeStarted), totalBytes, written)
+			}
+			p.closeDeviceTraced(tr)
 			return fmt.Errorf("failed to write %d bytes to USB printer %s: %w", size, p.idToString(), err)
 		}
 
 		data = data[size:]
 	}
+	if tr != nil {
+		tr.SetWrite(time.Since(writeStarted), totalBytes, written)
+	}
 	return nil
+}
+
+func (p *Printer) deviceOpenLocked() bool {
+	if p.connectionType == ConnKindLAN {
+		return p.tcpConn != nil
+	}
+	return p.device != nil
+}
+
+// closeDeviceTraced closes the device and records the time it took. It must be
+// called with p.mu held, like closeDeviceLocked.
+func (p *Printer) closeDeviceTraced(tr *trace.Trace) {
+	if tr == nil {
+		p.closeDeviceLocked()
+		return
+	}
+	started := time.Now()
+	p.closeDeviceLocked()
+	tr.AddClose(time.Since(started))
 }
 
 func (p *Printer) loop() {
@@ -155,8 +218,21 @@ func (p *Printer) loop() {
 			j.reply <- result
 			close(j.reply)
 		}
+		var (
+			closeDur time.Duration
+			closed   bool
+		)
 		if len(p.jobs) == 0 {
+			started := time.Now()
 			p.close()
+			closeDur = time.Since(started)
+			closed = true
+		}
+		if j.trace != nil {
+			if closed {
+				j.trace.MarkIdleClose(closeDur)
+			}
+			j.trace.Finish()
 		}
 	}
 }

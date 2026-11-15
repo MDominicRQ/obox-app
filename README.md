@@ -33,3 +33,9 @@ sudo apt update
 sudo apt install libwebkit2gtk-4.1-0
 ```
 
+## Diagnostics
+
+Every print ticket writes one `print_trace` line with per-stage timings,
+byte counts and a `request_id` correlation. See
+[docs/printing-benchmark.md](docs/printing-benchmark.md) for the field reference
+and the reproducible benchmark protocol.

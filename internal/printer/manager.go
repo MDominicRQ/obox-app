@@ -2,21 +2,23 @@ package printer
 
 import (
 	"errors"
-	"epos-proxy/internal/logger"
 	"fmt"
 	"sync"
+
+	"epos-proxy/internal/logger"
+	"epos-proxy/internal/trace"
 )
 
 const MaxCachedPrinters = 128
 
 var (
 	ErrLANPrinterNotAllowed = errors.New("LAN printer is not configured")
-	ErrPrinterCacheFull      = errors.New("printer cache limit reached")
+	ErrPrinterCacheFull     = errors.New("printer cache limit reached")
 )
 
 type Manager struct {
-	mu             sync.RWMutex
-	printers       map[string]*Printer
+	mu              sync.RWMutex
+	printers        map[string]*Printer
 	allowLANPrinter func(string) bool
 }
 
@@ -97,22 +99,39 @@ func (m *Manager) Get(id string) (*Printer, error) {
 }
 
 func (m *Manager) WriteAsync(printerID string, data []byte) (<-chan JobResult, error) {
+	return m.WriteAsyncTraced(printerID, data, nil)
+}
+
+// WriteAsyncTraced queues a print job and attaches its per-ticket trace. A nil
+// trace keeps the historical behaviour: the bytes, the queue and the device
+// operations are identical either way.
+func (m *Manager) WriteAsyncTraced(printerID string, data []byte, tr *trace.Trace) (<-chan JobResult, error) {
 	p, err := m.Get(printerID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get printer for ID %s: %w", printerID, err)
 	}
 
+	if tr != nil {
+		tr.MarkEnqueue()
+	}
+
 	reply := make(chan JobResult, 1)
-	err = p.Enqueue(func(p *Printer) JobResult {
+	err = p.EnqueueTraced(func(p *Printer) JobResult {
+		if tr != nil {
+			tr.MarkJobStart()
+		}
 		logger.Debugf("Executing print job for printer %s", printerID)
-		if err := p.Write(data); err != nil {
+		if err := p.write(data, tr); err != nil {
 			return JobResult{Err: fmt.Errorf("print job failed for printer %s: %w", printerID, err)}
 		}
 		logger.Debugf("Print job completed for printer %s", printerID)
 		return JobResult{OK: true}
-	}, reply)
+	}, reply, tr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to enqueue print job for printer %s: %w", printerID, err)
+	}
+	if tr != nil {
+		tr.MarkQueued()
 	}
 
 	return reply, nil

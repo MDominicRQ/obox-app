@@ -17,14 +17,17 @@ import (
 	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/logger"
 	"epos-proxy/internal/printer"
+	"epos-proxy/internal/trace"
 )
 
+var errEmptyLabel = errors.New("empty label data")
+
 const (
-	maxRequestBodyBytes = int64(4 * 1024 * 1024)
-	serverReadTimeout    = 15 * time.Second
-	serverWriteTimeout   = 30 * time.Second
-	serverIdleTimeout    = 60 * time.Second
-	serverHeaderTimeout  = 5 * time.Second
+	maxRequestBodyBytes   = int64(4 * 1024 * 1024)
+	serverReadTimeout     = 15 * time.Second
+	serverWriteTimeout    = 30 * time.Second
+	serverIdleTimeout     = 60 * time.Second
+	serverHeaderTimeout   = 5 * time.Second
 	serverShutdownTimeout = 5 * time.Second
 )
 
@@ -344,21 +347,65 @@ func newServer(port, httpsPort int, certFile, keyFile string, mgr *printer.Manag
 	return server
 }
 
+// requestIDHeader lets a caller correlate its own client-side timing with the
+// proxy log. Odoo does not send it, so a random id is generated per ticket.
+const requestIDHeader = "X-Request-Id"
+
+// newTicketTrace starts the timing trace for one print request and echoes its
+// id back to the client.
+func newTicketTrace(w http.ResponseWriter, r *http.Request, printerID, kind string) *trace.Trace {
+	tr := trace.New(trace.RequestID(r.Header.Get(requestIDHeader)), printerID, printTransport(printerID), kind)
+	w.Header().Set(requestIDHeader, tr.ID())
+	return tr
+}
+
+func printTransport(printerID string) string {
+	if _, ok := printer.DecodeLANPrinterID(printerID); ok {
+		return trace.TransportLAN
+	}
+	return trace.TransportUSB
+}
+
+// finishTrace completes and emits the ticket line. It runs after the response
+// was written, so waiting for the device close never delays Odoo.
+func finishTrace(tr *trace.Trace, code string, jobErr error) {
+	tr.SetCode(code)
+	tr.SetError(jobErr)
+	tr.SetTotal(time.Since(tr.RecvAt()))
+	tr.Settle(trace.SettleTimeout)
+	tr.Log()
+}
+
 func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string) {
+	tr := newTicketTrace(w, r, printerID, trace.KindReceipt)
+
+	bodyStarted := time.Now()
 	body, err := readBody(w, r)
+	tr.SetBody(time.Since(bodyStarted), len(body))
+	tr.SetRaster(trace.RasterSize(body))
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		code := "BadRequest"
+		if errors.As(err, &maxErr) {
+			code = "PayloadTooLarge"
+		}
+		finishTrace(tr, code, err)
 		return
 	}
 
-	logger.Debugf("Processing print job for printer: %s", printerID)
+	logger.Debugf("Processing print job for printer: %s request_id=%s", printerID, tr.ID())
+	parseStarted := time.Now()
 	jobData, err := escpos.ParseXML(body)
+	tr.SetParse(time.Since(parseStarted))
+	tr.SetImageMode(trace.DetectImageMode(jobData))
 	if err != nil {
-		logger.Errorf("XML parsing error: %v", err)
+		logger.Errorf("XML parsing error: %v request_id=%s", err, tr.ID())
 		writeEPOSResponse(w, EPOSResponse{Success: false, Code: "SchemaError", Status: ""})
+		finishTrace(tr, "SchemaError", err)
 		return
 	}
 
-	reply, err := mgr.WriteAsync(printerID, jobData)
+	reply, err := mgr.WriteAsyncTraced(printerID, jobData, tr)
 	if err == nil {
 		result := <-reply
 		if !result.OK {
@@ -371,27 +418,36 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 			retCode = "TooManyRequests"
 			logger.Warn("Printer queue full")
 		}
-		logger.Errorf("Print error [%s]: %v, Printer ID: %s", retCode, err, printerID)
+		logger.Errorf("Print error [%s]: %v, Printer ID: %s request_id=%s", retCode, err, printerID, tr.ID())
 		writeEPOSResponse(w, EPOSResponse{Success: false, Code: retCode, Status: ""})
+		finishTrace(tr, retCode, err)
 		return
 	}
 
-	logger.Infof("Print job completed successfully for printer: %s", printerID)
+	logger.Infof("Print job completed successfully for printer: %s request_id=%s", printerID, tr.ID())
 	writeEPOSResponse(w, EPOSResponse{Success: true, Code: "", Status: ""})
+	finishTrace(tr, "", nil)
 }
 
 func printLabel(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string) {
+	tr := newTicketTrace(w, r, printerID, trace.KindLabel)
+	tr.SetImageMode(trace.ImageModeRaw)
+
+	bodyStarted := time.Now()
 	jobData, err := readBody(w, r)
+	tr.SetBody(time.Since(bodyStarted), len(jobData))
 	if err != nil {
+		finishTrace(tr, "BadRequest", err)
 		return
 	}
 	if len(jobData) == 0 {
 		logger.Warn("Empty label data received")
 		http.Error(w, "Empty label data", http.StatusBadRequest)
+		finishTrace(tr, "EmptyLabel", errEmptyLabel)
 		return
 	}
 
-	reply, err := mgr.WriteAsync(printerID, jobData)
+	reply, err := mgr.WriteAsyncTraced(printerID, jobData, tr)
 	if err == nil {
 		result := <-reply
 		if !result.OK {
@@ -400,17 +456,20 @@ func printLabel(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pr
 	}
 	if err != nil {
 		if errors.Is(err, printer.ErrQueueFull) {
-			logger.Warnf("Printer queue full, Printer ID: %s", printerID)
+			logger.Warnf("Printer queue full, Printer ID: %s request_id=%s", printerID, tr.ID())
 			http.Error(w, "Printer queue full", http.StatusTooManyRequests)
+			finishTrace(tr, "TooManyRequests", err)
 			return
 		}
-		logger.Errorf("Print error: %v, Printer ID: %s", err, printerID)
+		logger.Errorf("Print error: %v, Printer ID: %s request_id=%s", err, printerID, tr.ID())
 		http.Error(w, "Printer error", http.StatusInternalServerError)
+		finishTrace(tr, "EX_BADPORT", err)
 		return
 	}
 
-	logger.Infof("Print job completed successfully for printer: %s", printerID)
+	logger.Infof("Print job completed successfully for printer: %s request_id=%s", printerID, tr.ID())
 	w.WriteHeader(http.StatusOK)
+	finishTrace(tr, "", nil)
 }
 
 func (s *Server) StartError() error {
