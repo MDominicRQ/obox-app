@@ -19,6 +19,7 @@ package trace
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"strconv"
 	"strings"
@@ -40,6 +41,22 @@ const (
 const (
 	KindReceipt = "receipt"
 	KindLabel   = "label"
+)
+
+// Cancel stages reported when the client abandoned the ticket before the proxy
+// returned its response.
+//
+//   - before_enqueue: the request context was already canceled when the handler
+//     was about to queue the job. Nothing reached the printer.
+//   - queued: the job had been queued but the device write had not started, so
+//     the job was skipped. Nothing reached the printer.
+//   - after_write: the ticket had already been written to the device when the
+//     client gave up. The ticket is printed and the proxy must not send it
+//     again; a new send can only come from a manual retry on the POS.
+const (
+	CancelStageBeforeEnqueue = "before_enqueue"
+	CancelStageQueued        = "queued"
+	CancelStageAfterWrite    = "after_write"
 )
 
 // Image modes reported in the trace line.
@@ -112,10 +129,13 @@ type Trace struct {
 	imageCount  int
 	rasterW     int
 	rasterH     int
+	fingerprint string
 
-	queued bool
-	code   string
-	err    error
+	queued         bool
+	code           string
+	err            error
+	clientCanceled bool
+	cancelStage    string
 
 	done     chan struct{}
 	doneOnce sync.Once
@@ -171,6 +191,31 @@ func (t *Trace) SetParse(d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.parseDur = d
+}
+
+// SetFingerprint records the digest of the ticket body, so two trace lines that
+// carry the same ticket can be correlated without logging its content.
+func (t *Trace) SetFingerprint(fingerprint string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.fingerprint = fingerprint
+}
+
+// MarkClientCanceled records that the client abandoned the ticket at the given
+// stage. It does not change what the proxy sends to the device; it only makes
+// the abandoned job visible in the trace line.
+func (t *Trace) MarkClientCanceled(stage string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.clientCanceled = true
+	t.cancelStage = stage
+}
+
+// ClientCanceled reports whether the client abandoned the ticket.
+func (t *Trace) ClientCanceled() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.clientCanceled
 }
 
 // SetImageMode records the image mode detected in the generated ESC/POS.
@@ -354,7 +399,10 @@ func (t *Trace) lineLocked() string {
 	writeField(&b, "image_mode", t.imageMode)
 	writeField(&b, "status", status)
 	writeField(&b, "code", t.code)
+	writeField(&b, "client_canceled", strconv.FormatBool(t.clientCanceled))
+	writeField(&b, "cancel_stage", t.cancelStage)
 	writeInt(&b, "xml_bytes", t.xmlBytes)
+	writeField(&b, "body_sha256", t.fingerprint)
 	writeInt(&b, "escpos_bytes", t.escposBytes)
 	writeInt(&b, "device_bytes", t.deviceBytes)
 	writeInt(&b, "write_blocks", len(t.blocks))
@@ -413,6 +461,17 @@ func RequestID(clientID string) string {
 		return hex.EncodeToString(raw[:])
 	}
 	return "req-" + strconv.FormatUint(fallbackID.Add(1), 10)
+}
+
+// Fingerprint returns a short, stable digest of the ticket body.
+//
+// It lets an operator correlate two trace lines that carry the same ticket, for
+// example an automatic send followed by a manual retry after the client timed
+// out. The digest never contains receipt content and is short enough to scan by
+// eye, so it can be logged without leaking what was printed.
+func Fingerprint(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:8])
 }
 
 // hasAlphanumeric rejects client values that sanitising turned into

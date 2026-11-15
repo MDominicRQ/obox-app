@@ -382,6 +382,57 @@ func finishTrace(tr *trace.Trace, code string, jobErr error) {
 	}()
 }
 
+// clientCanceledCode marks a ticket the client abandoned. It is recorded in the
+// trace only; it is not an ePOS error code and is never returned to a printer
+// that is still listening.
+const clientCanceledCode = "ClientCanceled"
+
+// noteClientCanceled records that the client abandoned the ticket without
+// changing what is sent to the device. The line lets an operator spot a print
+// that happened after the POS already reported a failure, which is the usual
+// origin of a duplicate caused by a manual retry.
+func noteClientCanceled(tr *trace.Trace, stage, printerID string, reason error) {
+	tr.MarkClientCanceled(stage)
+	logger.Warnf(
+		"Client abandoned print ticket printer=%s request_id=%s stage=%s err=%v",
+		printerID, tr.ID(), stage, reason,
+	)
+}
+
+// runPrintJob queues one ticket and waits for its result.
+//
+// The request context is checked twice. Before queueing, a canceled request is
+// dropped without touching the printer. After the job reply, the trace records
+// whether the client was gone while the ticket was in flight. The device write
+// itself is never interrupted: once a ticket has been sent it completes and
+// reports its real result, and the proxy never re-sends it on its own. The
+// returned bool reports a drop before queueing, in which case nothing was
+// printed and writing a response is pointless.
+func runPrintJob(ctx context.Context, mgr *printer.Manager, printerID string, data []byte, tr *trace.Trace) (err error, droppedBeforeEnqueue bool) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		noteClientCanceled(tr, trace.CancelStageBeforeEnqueue, printerID, ctxErr)
+		return ctxErr, true
+	}
+
+	reply, err := mgr.WriteAsyncContext(ctx, printerID, data, tr)
+	if err != nil {
+		return err, false
+	}
+	result := <-reply
+	if !result.OK {
+		err = result.Err
+	}
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		stage := trace.CancelStageAfterWrite
+		if errors.Is(err, printer.ErrCanceled) {
+			stage = trace.CancelStageQueued
+		}
+		noteClientCanceled(tr, stage, printerID, ctxErr)
+	}
+	return err, false
+}
+
 func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string) {
 	tr := newTicketTrace(w, r, printerID, trace.KindReceipt)
 
@@ -389,6 +440,7 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 	body, err := readBody(w, r)
 	tr.SetBody(time.Since(bodyStarted), len(body))
 	tr.SetRaster(trace.RasterSize(body))
+	tr.SetFingerprint(trace.Fingerprint(body))
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		code := "BadRequest"
@@ -411,12 +463,10 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 		return
 	}
 
-	reply, err := mgr.WriteAsyncTraced(printerID, jobData, tr)
-	if err == nil {
-		result := <-reply
-		if !result.OK {
-			err = result.Err
-		}
+	err, dropped := runPrintJob(r.Context(), mgr, printerID, jobData, tr)
+	if dropped || errors.Is(err, printer.ErrCanceled) {
+		finishTrace(tr, clientCanceledCode, err)
+		return
 	}
 	if err != nil {
 		retCode := "EX_BADPORT"
@@ -432,6 +482,9 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 
 	logger.Infof("Print job completed successfully for printer: %s request_id=%s", printerID, tr.ID())
 	writeEPOSResponse(w, EPOSResponse{Success: true, Code: "", Status: ""})
+	if ctxErr := r.Context().Err(); ctxErr != nil {
+		noteClientCanceled(tr, trace.CancelStageAfterWrite, printerID, ctxErr)
+	}
 	finishTrace(tr, "", nil)
 }
 
@@ -442,6 +495,7 @@ func printLabel(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pr
 	bodyStarted := time.Now()
 	jobData, err := readBody(w, r)
 	tr.SetBody(time.Since(bodyStarted), len(jobData))
+	tr.SetFingerprint(trace.Fingerprint(jobData))
 	if err != nil {
 		finishTrace(tr, "BadRequest", err)
 		return
@@ -453,12 +507,10 @@ func printLabel(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	reply, err := mgr.WriteAsyncTraced(printerID, jobData, tr)
-	if err == nil {
-		result := <-reply
-		if !result.OK {
-			err = result.Err
-		}
+	err, dropped := runPrintJob(r.Context(), mgr, printerID, jobData, tr)
+	if dropped || errors.Is(err, printer.ErrCanceled) {
+		finishTrace(tr, clientCanceledCode, err)
+		return
 	}
 	if err != nil {
 		if errors.Is(err, printer.ErrQueueFull) {
@@ -475,6 +527,9 @@ func printLabel(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pr
 
 	logger.Infof("Print job completed successfully for printer: %s request_id=%s", printerID, tr.ID())
 	w.WriteHeader(http.StatusOK)
+	if ctxErr := r.Context().Err(); ctxErr != nil {
+		noteClientCanceled(tr, trace.CancelStageAfterWrite, printerID, ctxErr)
+	}
 	finishTrace(tr, "", nil)
 }
 

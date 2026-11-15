@@ -31,6 +31,10 @@ const (
 var (
 	ErrNotFound  = errors.New("printer not found")
 	ErrQueueFull = errors.New("printer queue is full")
+	// ErrCanceled reports a job dropped because the client canceled the request
+	// before the device write started. It is never returned once bytes have been
+	// sent to the device.
+	ErrCanceled = errors.New("print job canceled before the device write")
 )
 
 type JobResult struct {

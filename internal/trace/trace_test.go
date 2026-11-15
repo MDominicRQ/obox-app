@@ -283,3 +283,41 @@ func TestRequestIDReplacesPunctuationOnlyValues(t *testing.T) {
 	testutil.ExpectedNotEqual(t, id, "___")
 	testutil.ExpectedLen(t, []byte(id), 2*requestIDEntropy)
 }
+
+func TestFingerprintIsStableAndShort(t *testing.T) {
+	first := Fingerprint([]byte("<epos-print><text>ORDER #42</text></epos-print>"))
+	second := Fingerprint([]byte("<epos-print><text>ORDER #42</text></epos-print>"))
+	other := Fingerprint([]byte("<epos-print><text>ORDER #43</text></epos-print>"))
+
+	testutil.ExpectedEqual(t, first, second)
+	testutil.ExpectedNotEqual(t, first, other)
+	testutil.ExpectedEqual(t, len(first), 16)
+}
+
+func TestLineReportsClientCancellation(t *testing.T) {
+	body := []byte("<epos-print><text>ORDER #42</text></epos-print>")
+	tr := New("req-cancel", "LAN:127.0.0.1", TransportLAN, KindReceipt)
+	tr.SetBody(time.Millisecond, len(body))
+	tr.SetFingerprint(Fingerprint(body))
+	tr.SetWrite(2*time.Millisecond, 128, 128)
+	tr.MarkClientCanceled(CancelStageAfterWrite)
+
+	got := parseFields(tr.Line())
+
+	testutil.ExpectedEqual(t, got["client_canceled"], "true")
+	testutil.ExpectedEqual(t, got["cancel_stage"], CancelStageAfterWrite)
+	testutil.ExpectedEqual(t, got["body_sha256"], Fingerprint(body))
+	testutil.ExpectedEqual(t, got["status"], statusOK)
+	testutil.ExpectedEqual(t, got["device_bytes"], "128")
+}
+
+func TestLineReportsNoCancellationByDefault(t *testing.T) {
+	tr := New("req-ok", "LAN:127.0.0.1", TransportLAN, KindReceipt)
+
+	got := parseFields(tr.Line())
+
+	testutil.ExpectedEqual(t, got["client_canceled"], "false")
+	testutil.ExpectedEqual(t, got["cancel_stage"], unknownField)
+	testutil.ExpectedEqual(t, got["body_sha256"], unknownField)
+	testutil.ExpectedFalse(t, tr.ClientCanceled())
+}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -594,4 +596,116 @@ func TestFinishTraceDoesNotBlockHandler(t *testing.T) {
 	}
 
 	tr.Finish()
+}
+
+// TestPrintData_CanceledBeforeEnqueueDoesNotPrint covers the first safety rule:
+// a request Odoo already abandoned must not reach the printer, because Odoo
+// will offer a retry and that retry would print a duplicate.
+func TestPrintData_CanceledBeforeEnqueueDoesNotPrint(t *testing.T) {
+	received := startCapturePrinter(t)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	printerID := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", printerID), bytes.NewReader([]byte(completeTicket))).
+		WithContext(ctx)
+	req.Header.Set("Content-Type", "text/xml")
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedLen(t, body, 0)
+
+	select {
+	case payload := <-received:
+		t.Fatalf("device received %d bytes for a canceled request: %q", len(payload), payload)
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+// TestPrintData_LabelCanceledBeforeEnqueueDoesNotPrint mirrors the receipt
+// rule on the label endpoint.
+func TestPrintData_LabelCanceledBeforeEnqueueDoesNotPrint(t *testing.T) {
+	received := startCapturePrinter(t)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	printerID := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/p/%s/pstprnt", printerID), bytes.NewReader([]byte("^XA^FDCANCELED^FS^XZ"))).
+		WithContext(ctx)
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedLen(t, body, 0)
+
+	select {
+	case payload := <-received:
+		t.Fatalf("device received %d bytes for a canceled label request: %q", len(payload), payload)
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+// TestPrintData_SendsEachTicketOnce pins the single-send contract: one POST
+// produces exactly one device write and no automatic retry.
+func TestPrintData_SendsEachTicketOnce(t *testing.T) {
+	payloads := make(chan []byte, 4)
+	var connections atomic.Int32
+	_, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
+		defer conn.Close()
+		connections.Add(1)
+		payload, _ := io.ReadAll(conn)
+		if len(payload) > 0 {
+			payloads <- payload
+		}
+	})
+	testutil.ExpectedNoError(t, err)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	printerID := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", printerID), bytes.NewReader([]byte(completeTicket)))
+	req.Header.Set("Content-Type", "text/xml")
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `success="true"`)
+
+	expected, err := escpos.ParseXML([]byte(completeTicket))
+	testutil.ExpectedNoError(t, err)
+
+	select {
+	case captured := <-payloads:
+		testutil.ExpectedBytesEqual(t, captured, expected, "the device must receive the ticket exactly once")
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the ticket payload")
+	}
+
+	select {
+	case extra := <-payloads:
+		t.Fatalf("device received a second write of %d bytes; the proxy must not resend", len(extra))
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	testutil.ExpectedEqual(t, int(connections.Load()), 1)
 }

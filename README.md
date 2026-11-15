@@ -38,4 +38,6 @@ sudo apt install libwebkit2gtk-4.1-0
 Every print ticket writes one `print_trace` line with per-stage timings,
 byte counts and a `request_id` correlation. See
 [docs/printing-benchmark.md](docs/printing-benchmark.md) for the field reference
-and the reproducible benchmark protocol.
+and the reproducible benchmark protocol, and
+[docs/odoo-print-retry.md](docs/odoo-print-retry.md) for what happens when Odoo
+abandons a print request and how to spot a possible duplicate in the logs.

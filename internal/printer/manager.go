@@ -1,6 +1,7 @@
 package printer
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -99,24 +100,56 @@ func (m *Manager) Get(id string) (*Printer, error) {
 }
 
 func (m *Manager) WriteAsync(printerID string, data []byte) (<-chan JobResult, error) {
-	return m.WriteAsyncTraced(printerID, data, nil)
+	return m.WriteAsyncContext(context.Background(), printerID, data, nil)
 }
 
 // WriteAsyncTraced queues a print job and attaches its per-ticket trace. A nil
 // trace keeps the historical behaviour: the bytes, the queue and the device
 // operations are identical either way.
 func (m *Manager) WriteAsyncTraced(printerID string, data []byte, tr *trace.Trace) (<-chan JobResult, error) {
-	p, err := m.Get(printerID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get printer for ID %s: %w", printerID, err)
+	return m.WriteAsyncContext(context.Background(), printerID, data, tr)
+}
+
+// WriteAsyncContext queues a print job bound to the request context.
+//
+// The context is only consulted once, when the printer loop is about to write
+// to the device: if the client already abandoned the request, the job is
+// skipped and reports ErrCanceled, because printing it would add an orphan
+// ticket the POS already reported as failed. Once the write starts it is never
+// interrupted, so a job that reached the device always completes and reports
+// its real result.
+//
+// No path in the manager re-sends a job on failure: a retry can only come from
+// a new client request.
+func (m *Manager) WriteAsyncContext(ctx context.Context, printerID string, data []byte, tr *trace.Trace) (<-chan JobResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	if tr != nil {
 		tr.MarkEnqueue()
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if tr != nil {
+			tr.MarkClientCanceled(trace.CancelStageBeforeEnqueue)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrCanceled, ctxErr)
+	}
+
+	p, err := m.Get(printerID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get printer for ID %s: %w", printerID, err)
+	}
 
 	reply := make(chan JobResult, 1)
 	err = p.EnqueueTraced(func(p *Printer) JobResult {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if tr != nil {
+				tr.MarkClientCanceled(trace.CancelStageQueued)
+			}
+			logger.Warnf("Skipping queued print job for printer %s: client abandoned the request: %v", printerID, ctxErr)
+			return JobResult{Err: fmt.Errorf("%w: %v", ErrCanceled, ctxErr)}
+		}
 		if tr != nil {
 			tr.MarkJobStart()
 		}
