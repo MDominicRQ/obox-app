@@ -353,3 +353,16 @@ func TestDeviceBytesStartsAtZero(t *testing.T) {
 	tr.SetWrite(time.Millisecond, 100, 40)
 	testutil.ExpectedEqual(t, tr.DeviceBytes(), 40)
 }
+
+// The CUPS branch records its transport and lp timing in the same trace line
+// as the fingerprint and cancellation fields.
+func TestTrace_CUPSTransportAndTimingAreRendered(t *testing.T) {
+	tr := New("req-cups", "lan-192.168.1.55", TransportLAN, KindReceipt)
+	tr.SetFingerprint("abc123")
+	tr.SetTransport(TransportCUPS)
+	tr.SetCUPS(12*time.Millisecond, 0)
+	fields := parseFields(tr.Line())
+	testutil.ExpectedEqual(t, fields["transport"], TransportCUPS)
+	testutil.ExpectedEqual(t, fields["body_sha256"], "abc123")
+	testutil.ExpectedEqual(t, fields["cups_lp_ms"], "12.000")
+}

@@ -356,10 +356,17 @@ const requestIDHeader = "X-Request-Id"
 
 // newTicketTrace starts the timing trace for one print request and echoes its
 // id back to the client.
-func newTicketTrace(w http.ResponseWriter, r *http.Request, printerID, kind string) *trace.Trace {
-	tr := trace.New(trace.RequestID(r.Header.Get(requestIDHeader)), printerID, printTransport(printerID), kind)
+func newTicketTrace(w http.ResponseWriter, r *http.Request, printerID, kind, transport string) *trace.Trace {
+	tr := trace.New(trace.RequestID(r.Header.Get(requestIDHeader)), printerID, transport, kind)
 	w.Header().Set(requestIDHeader, tr.ID())
 	return tr
+}
+
+func traceTransport(printerID string, mode escpos.ImageMode) string {
+	if mode == escpos.ImageMode("cups_driver") {
+		return trace.TransportCUPS
+	}
+	return printTransport(printerID)
 }
 
 func printTransport(printerID string) string {
@@ -470,7 +477,8 @@ func resolveImageMode(printerID string, policy AccessPolicy) escpos.ImageMode {
 }
 
 func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string, policy AccessPolicy) {
-	tr := newTicketTrace(w, r, printerID, trace.KindReceipt)
+	mode := resolveImageMode(printerID, policy)
+	tr := newTicketTrace(w, r, printerID, trace.KindReceipt, traceTransport(printerID, mode))
 
 	bodyStarted := time.Now()
 	body, err := readBody(w, r)
@@ -488,7 +496,6 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 	}
 
 	logger.Debugf("Processing print job for printer: %s request_id=%s", printerID, tr.ID())
-	mode := resolveImageMode(printerID, policy)
 
 	// Experimental macOS path: the same Epson CUPS driver that printed the
 	// user's comparison image quickly receives the original 1-bit Odoo image.
@@ -550,6 +557,7 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 		// by one CUPS page, so it stays on direct ESC/POS. Log it explicitly:
 		// silently switching transport per ticket would be hard to diagnose.
 		logger.Infof("CUPS mode skipped for printer=%s: job is not a single-image receipt; using direct ESC/POS", printerID)
+		tr.SetTransport(printTransport(printerID))
 		mode = escpos.ImageModeLegacy
 	}
 
@@ -594,7 +602,7 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 }
 
 func printLabel(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string) {
-	tr := newTicketTrace(w, r, printerID, trace.KindLabel)
+	tr := newTicketTrace(w, r, printerID, trace.KindLabel, printTransport(printerID))
 	tr.SetImageMode(trace.ImageModeRaw)
 
 	bodyStarted := time.Now()

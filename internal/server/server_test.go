@@ -807,3 +807,14 @@ func TestResolveImageMode_USBAndAutoSelectionStayLegacy(t *testing.T) {
 	testutil.ExpectedEqual(t, resolveImageMode("", AccessPolicy{}), escpos.ImageModeLegacy)
 	testutil.ExpectedEqual(t, resolveImageMode("USB-not-LAN", AccessPolicy{}), escpos.ImageModeLegacy)
 }
+
+// CUPS receipts must report transport=cups in the trace; mixed jobs that fall
+// back to direct ESC/POS keep their LAN/USB transport.
+func TestTraceTransport_CUPSModeIsReported(t *testing.T) {
+	lanID := printer.EncodeLANPrinterID("192.168.1.55")
+	testutil.ExpectedEqual(t, traceTransport(lanID, escpos.ImageMode("cups_driver")), trace.TransportCUPS)
+	testutil.ExpectedEqual(t, traceTransport(lanID, escpos.ImageModeLegacy), trace.TransportLAN)
+	testutil.ExpectedEqual(t, traceTransport(lanID, escpos.ImageModeEpsonGraphics), trace.TransportLAN)
+	testutil.ExpectedEqual(t, traceTransport("USB-not-LAN", escpos.ImageMode("cups_driver")), trace.TransportCUPS)
+	testutil.ExpectedEqual(t, traceTransport("USB-not-LAN", escpos.ImageModeLegacy), trace.TransportUSB)
+}

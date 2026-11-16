@@ -9,9 +9,10 @@ reproducible. Regeneration must be done from a checkout of `main@5d571a0`, not
 from the candidate branch; otherwise the test would compare the implementation
 against itself.
 
-Coverage: image heights below, on, and across the 2048-row legacy slice
-boundary (255/256 and 2047/2048/2049), a three-slice 4097-row image, and a
-mixed ticket with text, feed, image and cut.
+Coverage: 9 fixtures — image heights below, on, and across the 2048-row legacy
+slice boundary (255/256 and 2047/2048/2049), a three-slice 4097-row image,
+non-byte-aligned widths (12 and 100 dots at 385 rows), and a mixed ticket with
+text, feed, image and cut.
 
 Generator used on 16/11/2026 (Go 1.26.10, linux/arm64):
 

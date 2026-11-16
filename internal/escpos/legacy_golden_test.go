@@ -53,8 +53,8 @@ func TestLegacyGoldenMatchesMain5d571a0(t *testing.T) {
 			}
 		})
 	}
-	if seen != 7 {
-		t.Fatalf("expected 7 legacy fixtures, found %d", seen)
+	if seen != 9 {
+		t.Fatalf("expected 9 legacy fixtures, found %d", seen)
 	}
 }
 
