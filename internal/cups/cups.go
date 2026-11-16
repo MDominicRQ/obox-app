@@ -249,7 +249,9 @@ func (p *QueueProfile) hasMedia(choice string) bool {
 
 func (p *QueueProfile) customMedia() bool {
 	for choice := range p.mediaChoices() {
-		if strings.HasPrefix(choice, "Custom.") {
+		// Only an 80 mm custom width, or the PPD's generic
+		// Custom.WIDTHxLENGTH placeholder, justifies building Custom.80x<len>mm.
+		if strings.HasPrefix(choice, "Custom.80x") || strings.HasPrefix(choice, "Custom.WIDTHx") {
 			return true
 		}
 	}

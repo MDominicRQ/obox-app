@@ -330,3 +330,13 @@ func TestSubmit_TimeoutIsReportedWithoutResend(t *testing.T) {
 		t.Fatalf("an ambiguous timeout must not trigger a resend, got %d submissions", calls)
 	}
 }
+
+// A custom media entry for a different width must not be reused as 80 mm.
+func TestQueueProfile_RejectsNon80mmCustomMedia(t *testing.T) {
+	profile := parseQueueProfile("OTHERWIDTH", "Resolution/Output Resolution: *180x180dpi\n"+
+		"TmtPaperSource/Paper Source: *DocFeedNoCut DocFeedCut\n"+
+		"PageSize/Media Size: *Custom.100x150mm\n")
+	if err := profile.SupportsReceiptPrinting(); err == nil {
+		t.Fatal("a non-80 mm custom media queue must be refused")
+	}
+}
