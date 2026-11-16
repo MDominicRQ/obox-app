@@ -20,13 +20,21 @@ export function getMacSteps(info: main.TroubleshootInfo) {
       desc: "For Chrome/Chromium 142+, prefer the *LAN HTTP / LNA* address shown by ePOS Proxy and enable Odoo Local Network Access. In Chrome, open *Settings → Privacy and security → Site settings → Additional permissions → Local network* and allow your Odoo site.\n\nChrome 145+ separates LAN and loopback permissions, so a LAN address is the safest choice for modern Odoo. Use HTTPS only for legacy browser/macOS compatibility.",
     },
     {
+      title: "Firefox and Safari Address",
+      desc: "Firefox and Safari do not implement Odoo Local Network Access. With *Use Local Network Access* disabled, Odoo builds the printer URL with the scheme of the page: use *Local HTTP / LNA ON* or *LAN HTTP / LNA ON* for an *http://* Odoo, and *Local HTTPS / LNA OFF* or *LAN HTTPS / LNA OFF* for an *https://* Odoo after trusting the local CA.\n\nIf the option stays enabled, Odoo still builds an *http://* URL while the POS loads: on an *https://* page, LAN addresses are blocked as mixed content, while *127.0.0.1* loopback is treated as trustworthy and is not blocked. Disable it and reload the POS — Odoo 19.0: *Settings → Technical → System Parameters*, set *point_of_sale.use_lna* to *False*; Odoo 19.1+: uncheck the printer/POS option.\n\nIf the schemes do not match, the browser shows a connection or TLS error (for example *SSL_ERROR_RX_RECORD_TOO_LONG*) even when the certificate is valid.",
+    },
+    {
+      title: "Firefox Certificate Trust",
+      desc: `Firefox keeps its own certificate authorities. Firefox 120+ imports enterprise roots from the macOS Keychain by default, so a CA marked *Always Trust* in Keychain Access can be enough, but Firefox must be restarted afterwards. If Firefox still reports *SEC_ERROR_UNKNOWN_ISSUER*, import the CA manually:\n\n1. Open *Settings → Privacy & Security → Certificates → View Certificates…*.\n2. Open *Authorities → Import…* and choose *${info.httpsCaCert || "the epos-proxy-ca.crt file from the app's certs folder"}*.\n3. Check *Trust this CA to identify websites* and accept.\n4. Restart Firefox and open *https://* followed by the HTTPS address shown by the app without the */p/…* part (for example *https://127.0.0.1:4645/*). It must return *status: ok* without a warning.\n\nSafari uses the macOS Keychain, so the Keychain trust is enough there.`,
+    },
+    {
       title: "macOS Application Firewall",
       desc: "macOS may block incoming network access to ePOS Proxy through its built-in Application Firewall.\n\nYou can allow it in *System Settings → Privacy & Security → Firewall*, or run this in Terminal:",
       codes: [`sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp "/Applications/ePOS Proxy.app"`,],
     },
     {
       title: "Legacy HTTPS Trust",
-      desc: `If you must use the HTTPS address, use *App → Install HTTPS Certificate* first and mark the ePOS Proxy Local CA as trusted in Keychain Access. HTTPS listens on port *${info.httpsPort}*.`,
+      desc: `If you must use the HTTPS address, use *App → Install HTTPS Certificate* first and mark the ePOS Proxy Local CA as trusted in Keychain Access. HTTPS listens on port *${info.httpsPort}*.\n\nIn Firefox, follow the dedicated certificate step as well: Keychain trust alone is not always enough.`,
     },
     ...networkSteps(info),
   ];
