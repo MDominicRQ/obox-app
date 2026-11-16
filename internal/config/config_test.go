@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -373,4 +374,73 @@ func TestManager_SwitchingModeClearsAuthorizedCUPSQueue(t *testing.T) {
 	// A stale cups_driver entry without a queue must fall back to legacy.
 	cm.Data.LANImageModes["192.168.12.99"] = "cups_driver"
 	testutil.ExpectedEqual(t, cm.GetLANPrinterImageMode("192.168.12.99"), "legacy")
+}
+
+// Q3: switching CUPS back to legacy must persist the rollback across a reload,
+// drop only the app-side queue authorization, and never touch an existing
+// system print queue (the config layer only edits its own JSON).
+func TestManager_CUPSRollbackPersistsAndLeavesSystemQueueAlone(t *testing.T) {
+	dir := t.TempDir()
+	cm := &Manager{path: filepath.Join(dir, "config.json"), Data: defaults()}
+	ip := "192.168.12.33"
+	testutil.ExpectedNoError(t, cm.AddLanEposPrinter(ip))
+	testutil.ExpectedNoError(t, cm.SetLANPrinterCUPSQueue(ip, "TMTIENDA"))
+	testutil.ExpectedEqual(t, cm.GetLANPrinterImageMode(ip), "cups_driver")
+	testutil.ExpectedEqual(t, cm.GetLANPrinterCUPSQueue(ip), "TMTIENDA")
+
+	// A pre-existing queue owned by the system/another app: the app must not
+	// modify or delete it during an app-level rollback.
+	systemQueue := filepath.Join(dir, "system-queue-TMTIENDA.conf")
+	testutil.ExpectedNoError(t, os.WriteFile(systemQueue, []byte("shared queue\n"), 0o644))
+
+	reloaded := &Manager{path: cm.Path(), Data: defaults()}
+	testutil.ExpectedNoError(t, reloaded.Load())
+	testutil.ExpectedEqual(t, reloaded.GetLANPrinterImageMode(ip), "cups_driver")
+
+	testutil.ExpectedNoError(t, reloaded.SetLANPrinterImageMode(ip, "legacy"))
+	testutil.ExpectedEqual(t, reloaded.GetLANPrinterImageMode(ip), "legacy")
+	testutil.ExpectedEqual(t, reloaded.GetLANPrinterCUPSQueue(ip), "")
+
+	// Reload again: the rollback must be what is actually persisted.
+	after := &Manager{path: cm.Path(), Data: defaults()}
+	testutil.ExpectedNoError(t, after.Load())
+	testutil.ExpectedEqual(t, after.GetLANPrinterImageMode(ip), "legacy")
+	testutil.ExpectedEqual(t, after.GetLANPrinterCUPSQueue(ip), "")
+
+	raw, err := os.ReadFile(cm.Path())
+	testutil.ExpectedNoError(t, err)
+	if strings.Contains(string(raw), "lan_cups_queues") || strings.Contains(string(raw), "TMTIENDA") {
+		t.Fatalf("legacy rollback left CUPS authorization in config: %s", raw)
+	}
+	queueData, err := os.ReadFile(systemQueue)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedEqual(t, string(queueData), "shared queue\n")
+}
+
+// Q3: a stale CUPS entry without an authorized queue must resolve to legacy,
+// including after a reload.
+func TestManager_CUPSWithoutQueueResolvesLegacy(t *testing.T) {
+	dir := t.TempDir()
+	cm := &Manager{path: filepath.Join(dir, "config.json"), Data: defaults()}
+	ip := "192.168.12.44"
+	testutil.ExpectedNoError(t, cm.AddLanEposPrinter(ip))
+	cm.Data.LANImageModes = map[string]string{ip: "cups_driver"}
+	testutil.ExpectedNoError(t, cm.Save())
+
+	reloaded := &Manager{path: cm.Path(), Data: defaults()}
+	testutil.ExpectedNoError(t, reloaded.Load())
+	testutil.ExpectedEqual(t, reloaded.GetLANPrinterImageMode(ip), "legacy")
+	testutil.ExpectedEqual(t, reloaded.GetLANPrinterCUPSQueue(ip), "")
+}
+
+// Q3: USB, auto-selection and unconfigured IPs stay on the safe default.
+func TestManager_DefaultImageModeIsLegacyOutsideConfiguredLANToggle(t *testing.T) {
+	cm := &Manager{path: filepath.Join(t.TempDir(), "config.json"), Data: defaults()}
+	const unknown = "192.168.1.50"
+	testutil.ExpectedEqual(t, cm.GetLANPrinterImageMode(unknown), "legacy")
+	testutil.ExpectedEqual(t, cm.GetLANPrinterCUPSQueue(unknown), "")
+
+	testutil.ExpectedNoError(t, cm.AddLanEposPrinter(unknown))
+	testutil.ExpectedEqual(t, cm.GetLANPrinterImageMode(unknown), "legacy")
+	testutil.ExpectedEqual(t, cm.GetLANPrinterCUPSQueue(unknown), "")
 }

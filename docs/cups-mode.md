@@ -82,7 +82,7 @@ p50/p95/min/max and attach the raw logs.
 
 ## Rollback
 
-1. In the app, select **Compatible (GS v 0)** or **Epson optimized (GS ( L)**
+1. In the app, select **Compatible / legacy (GS v 0)** or **GS ( L — experimental**
    for that printer. This clears the stored CUPS queue and returns to direct
    ESC/POS on the next ticket (no restart needed).
 2. Confirm the next ticket logs `imageMode=legacy` (or `epson_graphics`) and

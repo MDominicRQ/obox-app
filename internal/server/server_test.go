@@ -796,3 +796,14 @@ func TestPrintData_CUPSModeWithoutQueueRefusesImage(t *testing.T) {
 	testutil.ExpectedContains(t, string(data), `success="false"`)
 	testutil.ExpectedContains(t, string(data), `code="EX_BADPORT"`)
 }
+
+// Q3: USB, auto-selection (empty printer id) and a zero-value policy never
+// inherit an experimental LAN image mode; only a configured LAN printer with
+// its own stored mode can leave legacy.
+func TestResolveImageMode_USBAndAutoSelectionStayLegacy(t *testing.T) {
+	experimental := AccessPolicy{LANImageMode: func(string) string { return "cups_driver" }}
+	testutil.ExpectedEqual(t, resolveImageMode("", experimental), escpos.ImageModeLegacy)
+	testutil.ExpectedEqual(t, resolveImageMode("USB-not-LAN", experimental), escpos.ImageModeLegacy)
+	testutil.ExpectedEqual(t, resolveImageMode("", AccessPolicy{}), escpos.ImageModeLegacy)
+	testutil.ExpectedEqual(t, resolveImageMode("USB-not-LAN", AccessPolicy{}), escpos.ImageModeLegacy)
+}

@@ -45,20 +45,20 @@ and the reproducible benchmark protocol, and
 abandons a print request and how to spot a possible duplicate in the logs.
 
 
-## Epson TM-T88IV / V / VI / VII — LAN receipt graphics
+## Epson TM-T88 family — LAN receipt graphics
 
 Odoo 19's Epson printer integration rasterizes a **complete HTML receipt** into
 one monochrome `<image>` command. This proxy can transmit those image pixels using
 Epson buffered graphics (**GS ( L**, function 112 to store, function 50 to print),
 instead of the older **GS v 0** raster command.
 
-- **LAN receipt printers:** **Compatible (GS v 0)** remains the default.
-  For a verified Epson TM-T88IV/V/VI/VII, select **Epson optimized (GS ( L)**
-  in the app's **LAN receipt image mode** dropdown. The option is stored per
-  printer IP and takes effect on the next ticket without changing the Odoo URL.
+- **LAN receipt printers:** **Compatible / legacy (GS v 0)** remains the default.
+  The **GS ( L — experimental** option is opt-in per printer IP
+  in the app's **LAN receipt image mode** dropdown. It is stored per printer IP
+  and takes effect on the next ticket without changing the Odoo URL.
   For unknown models, retain Compatible mode until explicitly validated.
 - **USB printers and raw label printing:** unchanged.
-- The optimized mode divides the image into 192-row graphics chunks (or fewer
+- The experimental GS ( L mode divides the image into 192-row graphics chunks (or fewer
   rows when necessary for the 16-bit command length). It does not drop image
   rows, modify pixels, disable cutting, or change paper density.
 - The application logs `Print timing ... imageMode=... xmlBytes=...

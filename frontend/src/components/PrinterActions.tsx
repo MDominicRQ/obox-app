@@ -102,7 +102,7 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
     try {
       await executePrint(printer, false, true);
       toastContext.actions.showToast(
-        `Graphics test sent to ${printer.name}. Check that the lines printed correctly.`,
+        `Image test sent to ${printer.name} using the currently selected mode. The proxy cannot confirm the physical result.`,
         "success",
       );
     } catch (err) {
@@ -248,8 +248,9 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
           onClick={onGraphicsTest}
           disabled={isGraphicsTesting}
           className="flex-1 border rounded-lg text-sm px-3 py-2 cursor-pointer border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+          title="Sends the test image with the currently selected LAN image mode. Legacy does not exercise GS ( L; CUPS requires a validated queue and profile."
         >
-          {isGraphicsTesting ? "Printing image..." : "Test graphics"}
+          {isGraphicsTesting ? "Sending image test..." : "Test image (current mode)"}
         </button>
       )}
 
@@ -275,11 +276,11 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
           onChange={(event) => void changeImageMode(event.target.value)}
           className="mt-1 block w-full border border-gray-300 rounded-lg p-2 bg-white text-gray-800 disabled:opacity-50"
         >
-          <option value="epson_graphics">Epson optimized (GS ( L) — TM-T88IV/V/VI/VII</option>
-          <option value="legacy">Compatible (GS v 0) — fallback for other models</option>
+          <option value="legacy">Compatible / legacy (GS v 0)</option>
+          <option value="epson_graphics">GS ( L — experimental</option>
           {isMac && (
             <option value="cups_driver" disabled={cupsQueues.length === 0}>
-              Epson system driver (macOS CUPS)
+              Epson system driver (macOS CUPS) — experimental
             </option>
           )}
         </select>
@@ -308,10 +309,12 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
         )}
         {cupsQueueError && <p className="mt-1 text-xs text-red-600">{cupsQueueError}</p>}
         <p className="mt-1 text-xs text-gray-500">
-          Compatible is the safe default. CUPS uses the local Epson driver for standard
-          Odoo image receipts; drawer pulses and other commands remain direct ESC/POS.
-          Selecting Compatible rolls back immediately and clears the stored queue.
-          Test one complete receipt before enabling more printers.
+          Compatible / legacy (GS v 0) is the default and the safe choice. GS ( L and
+          CUPS are experimental and opt-in; CUPS uses the local Epson driver for
+          standard Odoo image receipts, and drawer pulses and other commands remain
+          direct ESC/POS. Selecting Compatible rolls back immediately and clears the
+          stored queue; it does not delete any system print queue. Test one complete
+          receipt before enabling more printers.
         </p>
       </div>
     )}
