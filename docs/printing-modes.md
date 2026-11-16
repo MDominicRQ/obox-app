@@ -1,13 +1,21 @@
 # Printing modes, benchmark and rollout — Epson TM-T88 + Odoo 19 on macOS
 
-**Status:** draft for technical review · **Updated:** 2026-11-16 · **Scope:** Obox-app
+**Status:** draft for technical review, **not yet adopted** · **Updated:** 2026-11-16 · **Scope:** Obox-app
 (ePOS Proxy) and Odoo 19 on macOS 10.15–26 with Epson TM-T88 IV, V, VI and VII.
 
-This is the canonical reference for **choosing a printing mode, preparing a
-benchmark, trusting the local CA in Firefox, and rolling back**. It consolidates
-the accepted browser/CA guide, the benchmark protocol of PR #5 and the retry
-analysis of PR #6. It does **not** certify compatibility: no physical benchmark
-has been recorded yet (see [§5](#5-benchmark-results)).
+**Software snapshot:** candidate branch `integration/ds8-candidate`, PR #9, SHA
+`fcbb1e0`, which does **not** include the CUPS delta. It is an intermediate
+snapshot: modes, capabilities, SHA, CI status, links and hashes are updated only
+when a reviewed post-CUPS head is published, and any head change invalidates a
+prior review.
+
+This document is the **proposed single reference** for choosing a printing mode,
+preparing a benchmark, trusting the local CA in Firefox, and rolling back. It
+absorbs the browser/CA guide, the benchmark protocol of PR #5 and the retry
+analysis of PR #6, but it does **not** supersede the guide adopted by the PM
+until the corresponding review/adoption, and it does **not** certify
+compatibility: no physical benchmark has been recorded (see
+[§5](#5-benchmark-results)).
 
 Do not maintain parallel copies of this procedure. Update this document and let
 the guides link to it.
@@ -27,6 +35,10 @@ A unit test proves the model, not the printer. A passing CI run proves code
 compiles, not that a receipt printed.
 
 ## 2. What the code does today (`main`, `5d571a0`)
+
+The candidate snapshot `fcbb1e0` integrates PRs #5, #6 and #7 plus the #3 delta
+(traces, cancellation, Firefox matrix, `GS ( L` opt-in); it does **not** include
+CUPS yet. The bullets below describe `main` plus the draft PRs.
 
 - The proxy listens on HTTP `4545–4555` and HTTPS `4645–4655`, one port per
   printer slot **[C]** (`internal/config/config.go`).
@@ -62,6 +74,26 @@ compiles, not that a receipt printed.
 These are build constraints from `.github/workflows/build-macos.yml`
 **[C]**. A macOS 15 runner does not exercise Catalina or macOS 26; no version in
 10.15–26 has been executed for printing **[F]**.
+
+### 2.2 Browser requirements: declared, historical and tested are different things
+
+Only the following version pages were consulted (2026-11-16); each row states the
+property actually checked. No intermediate version, "last compatible" version or
+macOS 26 run is implied.
+
+| Browser and version page | Declared requirement checked | Historical availability | Real test |
+|---|---|---|---|
+| Firefox 115.0 (`mozilla.org/en-US/firefox/115.0/system-requirements/`) | macOS **10.12** or later; Intel x86 or Apple Silicon | Between 115 and 116 there is a declared jump; versions 117–127 and 129–147 were not consulted **[S]** | None **[F]** |
+| Firefox 116.0 (`…/firefox/116.0/…`) | macOS **10.15** or later | — | None **[F]** |
+| Firefox 128.0, 148.0, 149.0, 150.0 (`…/firefox/<version>/…`) | Each page declares macOS **10.15** or later | 150 still declaring 10.15 does not prove it is the last compatible, nor that later versions will | None **[F]** |
+| Chrome — `support.google.com/chrome/a/answer/7100626` | Current Mac requirement: **macOS 13 Ventura or later** | Last Chrome for 10.15, 11 and 12: **[S]**. The page has a support timeline only for Windows; the versioned macOS note was not retrieved (release-notes index returned 404) | None **[F]** |
+| Edge | No version page consulted | **[S]** | None |
+| Safari | Ships with each macOS (Apple support, 2026-09-14) | Exact Safari version after OS updates: **[S]**; macOS installer eligibility depends on the **Mac model** | None |
+
+These are **browser** requirements. They do not prove the proxy runs, that the
+Epson driver exists, or that printing works on that macOS: browser
+compatibility, binary minimum and Epson filter/CUPS availability are three
+independent checks.
 
 ## 3. Benchmark methodology
 
@@ -147,15 +179,25 @@ matches the chip.
 
 **R3 — Browser family.**
 
-- **Chromium (Chrome/Edge):** Local Network Access exists in current Chromium
-  (Chrome 142 reference **[M]**). Keep `point_of_sale.use_lna` enabled, use the
-  HTTP address, and grant the Odoo origin the *Local network* permission. If LNA
-  is unavailable or denied, Odoo falls back to the page scheme: on an `https://`
-  Odoo use the HTTPS address and trust the CA in the macOS Keychain.
-- **Firefox and Safari:** LNA is not implemented. Odoo's permission query throws,
-  `odoo.use_lna` becomes `false`, and the **Odoo page scheme** decides the URL
-  **[C]**. Disable `point_of_sale.use_lna` before loading the POS, then match the
-  scheme (R4).
+The URL is built once, at POS load, with the `odoo.use_lna` value configured at
+that moment (`this.address`); `initLNA()` may change the value afterwards but
+**does not rewrite** the URL **[C]**. Always read the real URL from the Network
+tab or the proxy log; do not recompute it from the current value.
+
+- **Chromium (Chrome/Edge):** Local Network Access is a Chromium capability
+  (Chrome 142 is a documentary reference; other versions **[S]**). With the
+  parameter enabled at load, the URL is `http://` even if Odoo is `https://`;
+  when the permission is granted, that request is exempt from mixed-content
+  blocking, including LAN. If the permission is denied or fails, the URL stays
+  `http://` (the later `false` does not rewrite it): loopback is not blocked as
+  mixed content and LAN may be blocked.
+- **Firefox and Safari:** LNA is not implemented; Odoo's permission query throws
+  and `odoo.use_lna` becomes `false` after `initLNA()` **[C]**. But if it was
+  **`true` at load**, the built URL is a persistent `http://`: with an
+  `https://` Odoo, LAN destinations are blocked as mixed content while loopback
+  is not; a scheme/port mismatch fails with a TLS/protocol error. To obtain the
+  page scheme, set the parameter to `false`, save and **reload the POS** so the
+  URL is rebuilt, then match the scheme (R4).
 
 **R4 — Odoo scheme → address.**
 
@@ -197,12 +239,17 @@ flowchart TD
     C -- No --> E[Use LAN address + enable Network printing + firewall + macOS 15 Local Network]
     D --> F{Browser family?}
     E --> F
-    F -- Chromium --> G[LNA enabled: HTTP address + grant Local network permission]
-    F -- Firefox/Safari --> H[LNA disabled: match Odoo scheme]
-    H --> I{Odoo scheme}
+    F -- Chromium --> G{LNA permission granted?}
+    G -- Yes --> G1[HTTP address; mixed content exempt]
+    G -- No --> G2[HTTP URL persists if enabled at load; LAN may block]
+    F -- Firefox/Safari --> H{use_lna at POS load?}
+    H -- true --> H1[HTTP URL persists: HTTPS+LAN blocked; loopback allowed]
+    H -- false --> I{Odoo scheme}
     I -- http:// --> J[HTTP address]
     I -- https:// --> K[HTTPS address + trust CA in Firefox/Safari]
-    G --> L{Printer connection}
+    G1 --> L{Printer connection}
+    G2 --> L
+    H1 --> L
     J --> L
     K --> L
     L -- USB --> M[legacy GS v 0]
@@ -217,7 +264,7 @@ flowchart TD
 | Mode | Applies to | Build | Requirements | Risks | Evidence |
 |---|---|---|---|---|---|
 | **Legacy `GS v 0`** | USB and LAN receipt printers | `main` | none | 2048-row slices and 64 KiB USB chunks unbenchmarked; some firmware may prefer 255 rows | **[C]** default, **[F]** performance |
-| **Epson `GS ( L`** | LAN receipt printers only, per printer IP | PR #3 | Model confirmed as TM-T88 IV–VII; opt-in in the app; physical test on that exact unit | `GS ( L` fn 112/50 not verified on V–VII; TCP acceptance ≠ printing; never auto-fall-back (duplicate risk) | **[C]** code/CI, **[F]** physical |
+| **Epson `GS ( L`** | LAN receipt printers only, selected experimentally per printer IP | PR #3 | Experimental opt-in in the app; a physical test is required on that exact unit and generation. Naming a model (IV, V, VI or VII) is **not** a sufficient condition: no generation has been validated, and there is no optimisation promise | `GS ( L` fn 112/50 not verified on any generation; TCP acceptance ≠ printing; never auto-fall-back (duplicate risk) | **[C]** code/CI, **[F]** physical |
 | **macOS CUPS** | macOS + LAN + local queue | PR #4 | Existing Epson queue whose device URI is `socket://<printer-ip>:9100`; queue named in the app; driver/PPD/options identified per queue | Profile is 180 DPI + `Tmt*` from a **IV** queue, not universal; custom media > 297 mm may be rejected/rescaled; `lp` accepted ≠ paper; no auto retry | **[C]** code/CI, **[F]** physical |
 
 Rules that apply to both experimental modes:
@@ -304,19 +351,52 @@ a Mac where the queue already exists and its owner authorised its use.
 
 ## 10. Rollback
 
-All rollbacks below are local, reversible and require no reinstall unless stated.
+There are three **separate** rollbacks: the application binary, the printing
+configuration and — optionally — certificate trust. Do not merge them: undoing
+one must not force the others.
+
+### 10.1 Before installing the candidate
+
+1. Quit the running app (**App → Quit**, not just closing the window).
+2. Keep the previous `.app` identified and reachable: record its version and
+   move it to a safe local folder (for example `~/Applications/EposProxy-previous.app`)
+   instead of overwriting it in place.
+3. Make a local copy of the configuration directory
+   `~/Library/Application Support/EposProxy/` (config and `certs/`). Keep it out
+   of tickets and reports; it may contain local paths and certificate material.
+4. Record the candidate SHA and its SHA-256 (§12).
+
+### 10.2 Returning to the previous application
+
+1. Quit the candidate.
+2. Restore the identified previous `.app` to its original location.
+3. Launch it and verify the version and the effective mode (`Compatible / legacy`
+   unless the previous configuration said otherwise).
+4. Keep the data directory, `certs/`, the CA and every system queue. **Do not**
+   delete the directory to "start clean". If a migration requires restoring the
+   configuration, do it with the app stopped and from the copy of step 10.1.3;
+   never wipe the whole directory.
 
 | Change | Rollback | Verify |
 |---|---|---|
-| GS ( L or CUPS per printer | Select **Compatible (GS v 0)** for that printer IP, or stop the app, remove the IP from `lan_image_modes`/`lan_cups_queues` in `~/Library/Application Support/EposProxy/config.json`, and start it | A test ticket prints; `lpstat -o <queue>` shows no job submitted by this ticket |
-| CUPS queue itself | `lpadmin -x <queue>` (admin; only with owner authorisation) | `lpstat -v` no longer lists the queue |
+| `GS ( L` or CUPS per printer | Select **Compatible (GS v 0)** for that printer IP; alternatively stop the app, remove the IP from `lan_image_modes`/`lan_cups_queues` in `~/Library/Application Support/EposProxy/config.json`, and start it | A test ticket prints; `lpstat -o <queue>` shows no job submitted by this ticket |
+| **CUPS queue** | **Keep it by default.** Disabling the opt-in and returning to legacy does **not** require deleting any queue. Never remove a pre-existing, shared or other-application queue. Only a temporary queue created specifically for this test, identified as such and authorised by its owner, may be removed with `lpadmin -x <queue>` | `lpstat -v` still lists every pre-existing queue; no print jobs submitted by this ticket |
 | Address/scheme | Copy the other address (HTTP ↔ HTTPS, loopback ↔ LAN) and **reload the POS** | Network tab shows the expected URL; base address returns `status: ok` |
 | Remote access | Disable **Network printing** | Non-loopback clients receive 403 again |
-| Firefox CA | Settings → Certificates → Authorities → select the ePOS CA → delete or edit trust; restart Firefox. Delete the CA from Keychain to undo system trust | HTTPS base address warns again; Firefox falls back to HTTP config or a re-trust |
-| Experimental build | Reinstall the previous release/artefact | App version and `/` status match the previous build; config, logs and CA persist |
-| Local CA | Do **not** delete `certs/` to "reset" HTTPS: the CA is not rotated automatically and a new one must be re-trusted everywhere | Re-trust required after any intentional CA replacement |
 
-Rollback of the *default* is simply "do nothing": `main` already ships legacy.
+### 10.3 Certificate trust is a separate, optional step
+
+Reinstalling the previous app must **not** remove CA trust or delete its keys
+automatically. Removing trust is an independent, explicit action: it can break
+HTTPS for the previous app version and for other browser profiles that rely on
+the same CA. If it is really needed, delete or edit trust in Firefox
+(Settings → Certificates → Authorities) or in the Keychain, then restart the
+browser; document that HTTPS will warn again afterwards.
+
+Do **not** delete `certs/` to "reset" HTTPS: the CA is not rotated
+automatically and a new one would have to be trusted everywhere again.
+
+Rollback of the *default* needs no action: legacy is already the default.
 
 ## 11. Known limitations
 
@@ -335,6 +415,13 @@ Rollback of the *default* is simply "do nothing": `main` already ships legacy.
   a modelled outcome; versions between the sampled ones are **[S]**. An
   `https://` Odoo with a LAN `http://` address is blocked without LNA, and a
   scheme mismatch fails before the certificate.
+- **Browser historical limits are incomplete.** The Firefox pages consulted
+  (115, 116, 128, 148, 149, 150) only declare a macOS minimum; the last
+  compatible version, intermediate versions and effective behaviour on macOS 26
+  are **[S]**. For Chrome only the current requirement (macOS 13+) was
+  verifiable; the last Chrome for 10.15/11/12 is **[S]** and Edge has no
+  consulted version. These browser declarations prove neither proxy execution
+  nor Epson driver availability **[S]**.
 - **Firewall and Local Network privacy.** macOS 15+ can block outgoing LAN
   connections and incoming connections to the proxy; ad-hoc signing weakens
   identity tracking across builds **[C]**.
@@ -376,7 +463,25 @@ Rollback of the *default* is simply "do nothing": `main` already ships legacy.
 | Firefox URL rules, CA steps, error mapping | `internal/compat/`, PR #7 `d450643`; DS-4 diagnosis |
 | `GS ( L` selection and legacy default | PR #3 `9345411`, `internal/escpos/commands.go` on that branch |
 | CUPS profile, queue matching, no auto retry | PR #4 `06033ab`, `internal/cups/cups.go` |
-| Accepted browser/CA guide | DS-2 comment `01a1df9a-bd4a-724f-ac8b-9cdaf4eec329` |
+| Accepted browser/CA guide (absorbed, not superseded until adoption) | DS-2 comment `01a1df9a-bd4a-724f-ac8b-9cdaf4eec329` |
+
+### 13.1 Official sources consulted (2026-11-16)
+
+| URL | What it proves | Limit / gap |
+|---|---|---|
+| `mozilla.org/en-US/firefox/115.0/system-requirements/` | Declared macOS 10.12+; Intel/Apple Silicon | Version specific; not a print or Catalina test |
+| `mozilla.org/en-US/firefox/116.0/system-requirements/` | Declared macOS 10.15+ | Version specific |
+| `mozilla.org/en-US/firefox/128.0/system-requirements/` (also 148.0, 149.0, 150.0) | Each declares macOS 10.15+ | Does not establish the last compatible version or macOS 26 behaviour |
+| `support.google.com/chrome/a/answer/7100626` | Current Mac requirement: macOS 13+ | No macOS timeline; last Chrome for 10.15/11/12 remains **[S]** |
+| `chromeenterprise.google/release-notes/` | Attempt to retrieve a versioned retirement note | **404**; no versioned macOS statement obtained |
+| `support.apple.com/en-us/122727` (published 2026-09-14) | macOS includes Safari; installer eligibility depends on the Mac model | Does not identify the Safari version on a given machine |
+| `support.apple.com/en-us/122867` (published 2026-09-14) | macOS Tahoe 26 supported Mac models (Intel and Apple Silicon listed) | Architecture alone is not enough |
+| `download.epson-biz.com/modules/pos/index.php?page=soft&scat=32` | Old POS portal closed on 2024-06-16; redirects to the new portal | No package/OS/model matrix |
+| `support.epson.net/setupnavi/?PINF=category&OSC=WS&GROUP=pos_product` | — | **403**; no Epson matrix (package, PPD, OS, architecture) |
+
+Use these declarations only for what the row states: none of them certifies
+printing, the proxy artefact or the Epson filter. The benchmark table stays
+empty until measurements exist.
 
 **Rollout order.** Merge and validate in this order: #5 (instrumentation) → #6
 (retry hardening) → #7 (Firefox/CA), keeping Vite 6.4.6. PR #3 and #4 stay

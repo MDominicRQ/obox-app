@@ -4,7 +4,7 @@ A lightweight desktop app that exposes your USB Epson printer as a local HTTP en
 
 ## Documentation
 
-- [Printing modes, benchmark and rollout](docs/printing-modes.md) — canonical reference: decision tree, `legacy` / `GS ( L` / CUPS selection, Firefox and local CA, rollback and known limitations.
+- [Printing modes, benchmark and rollout](docs/printing-modes.md) — reference in review (not yet adopted): decision tree, `legacy` / `GS ( L` / CUPS selection, Firefox and local CA, rollback and known limitations.
 - [macOS + Odoo 19 local printing](docs/macos11-odoo-https.md) — addresses, HTTP/HTTPS, Local Network Access and certificates.
 
 No physical benchmark has been published yet. Performance claims stay pending until the protocol in `docs/printing-benchmark.md` (PR #5) is run on real hardware.
