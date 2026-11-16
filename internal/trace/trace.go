@@ -252,6 +252,15 @@ func (t *Trace) SetImageMode(mode string) {
 	t.imageMode = mode
 }
 
+// SetTransport records the transport actually used for this ticket. It starts
+// as the printer's default and changes to CUPS only when a receipt is handed to
+// lp; a mixed job that falls back to direct ESC/POS keeps its LAN/USB value.
+func (t *Trace) SetTransport(transport string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.transport = transport
+}
+
 // SetRaster records the raster dimensions requested by the ticket.
 func (t *Trace) SetRaster(width, height, count int) {
 	t.mu.Lock()

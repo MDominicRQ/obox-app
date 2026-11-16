@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"epos-proxy/internal/cups"
 	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/logger"
 	"epos-proxy/internal/printer"
@@ -44,6 +45,7 @@ type EPOSResponse struct {
 type AccessPolicy struct {
 	NetworkPrintingEnabled func() bool
 	LANImageMode           func(string) string
+	LANCUPSQueue           func(string) string
 }
 
 func (p AccessPolicy) remoteAllowed() bool {
@@ -487,6 +489,70 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 
 	logger.Debugf("Processing print job for printer: %s request_id=%s", printerID, tr.ID())
 	mode := resolveImageMode(printerID, policy)
+
+	// Experimental macOS path: the same Epson CUPS driver that printed the
+	// user's comparison image quickly receives the original 1-bit Odoo image.
+	// Any non-image XML (notably <pulse/>) continues through direct ESC/POS.
+	if mode == escpos.ImageMode("cups_driver") {
+		parseStarted := time.Now()
+		img, imageErr := escpos.ExtractCUPSImage(body)
+		if imageErr != nil {
+			logger.Errorf("CUPS image parsing failed: %v", imageErr)
+			writeEPOSResponse(w, EPOSResponse{Success: false, Code: "SchemaError"})
+			finishTrace(tr, "SchemaError", imageErr)
+			return
+		}
+		if img != nil {
+			ip, ok := printer.DecodeLANPrinterID(printerID)
+			if !ok || policy.LANCUPSQueue == nil || policy.LANCUPSQueue(ip) == "" {
+				err := fmt.Errorf("CUPS mode is enabled without a verified queue for printer %s", printerID)
+				logger.Errorf("%v request_id=%s", err, tr.ID())
+				writeEPOSResponse(w, EPOSResponse{
+					Success: false,
+					Code:    "EX_BADPORT",
+					Status:  "Epson CUPS mode is enabled without a verified queue",
+				})
+				finishTrace(tr, "EX_BADPORT", err)
+				return
+			}
+			queue := policy.LANCUPSQueue(ip)
+			parseElapsed := time.Since(parseStarted)
+			tr.SetParse(parseElapsed)
+			tr.SetTransport(trace.TransportCUPS)
+			printStarted := time.Now()
+			pngSize, err := cups.Submit(r.Context(), ip, queue, img)
+			tr.SetCUPS(time.Since(printStarted), 0)
+			logger.Infof("Print timing printer=%s imageMode=cups_driver queue=%s xmlBytes=%d pngBytes=%d width=%d height=%d parse=%s cupsSubmit=%s request_id=%s",
+				printerID, queue, len(body), pngSize, img.Width, img.Height, parseElapsed, time.Since(printStarted), tr.ID())
+			if r.Context().Err() != nil && err == nil {
+				// A submission already handed to CUPS always finishes; Odoo may
+				// have aborted, so record it for duplicate triage.
+				logger.Warnf("Odoo canceled the request after printer=%s was submitted to CUPS queue=%s; no automatic resend request_id=%s", printerID, queue, tr.ID())
+				noteClientCanceled(tr, trace.CancelStageAfterWrite, printerID, r.Context().Err())
+			}
+			if err != nil {
+				// Never resend via ESC/POS: CUPS could already have queued the
+				// job, and an automatic fallback can duplicate sale receipts.
+				logger.Errorf("CUPS submission failed for printer %s: %v request_id=%s", printerID, err, tr.ID())
+				writeEPOSResponse(w, EPOSResponse{
+					Success: false,
+					Code:    "EX_BADPORT",
+					Status:  "Epson CUPS submission failed; check the Mac queue before retrying",
+				})
+				finishTrace(tr, "EX_BADPORT", err)
+				return
+			}
+			writeEPOSResponse(w, EPOSResponse{Success: true})
+			finishTrace(tr, "", nil)
+			return
+		}
+		// A mixed job (for example image plus <pulse/>) cannot be reproduced
+		// by one CUPS page, so it stays on direct ESC/POS. Log it explicitly:
+		// silently switching transport per ticket would be hard to diagnose.
+		logger.Infof("CUPS mode skipped for printer=%s: job is not a single-image receipt; using direct ESC/POS", printerID)
+		mode = escpos.ImageModeLegacy
+	}
+
 	parseStarted := time.Now()
 	jobData, err := escpos.ParseXMLWithMode(body, mode)
 	parseElapsed := time.Since(parseStarted)
