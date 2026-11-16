@@ -422,8 +422,18 @@ func Encode1BitPNG(img *escpos.CUPSImage, dpi int) ([]byte, error) {
 // after the job was already handed to CUPS, killing `lp` midway could leave a
 // half-submitted job while Odoo offers a retry, printing the receipt twice.
 func Submit(ctx context.Context, ip, queue string, img *escpos.CUPSImage) (int, error) {
+	// Cancellation is honoured while the queue is inspected, the PNG is
+	// encoded and the temporary file is prepared. The commitment boundary is
+	// immediately before lp is started: after that the job is detached from
+	// HTTP cancellation and finishes exactly once.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	profile, err := VerifiedQueue(ctx, ip, queue)
 	if err != nil {
+		return 0, err
+	}
+	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
 	pngData, err := Encode1BitPNG(img, defaultDPI)
@@ -453,6 +463,11 @@ func Submit(ctx context.Context, ip, queue string, img *escpos.CUPSImage) (int, 
 	args := append([]string{"-d", queue}, options...)
 	args = append(args, path)
 
+	// Last check before the commitment point: a cancelled request must not
+	// produce an orphan lp job, even with a warm validation cache.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	submitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cupsTimeout)
 	defer cancel()
 	if _, err := submitLP(submitCtx, args); err != nil {

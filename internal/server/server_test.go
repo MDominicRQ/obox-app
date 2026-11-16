@@ -12,11 +12,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"epos-proxy/internal/certs"
+	"epos-proxy/internal/cups"
 	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/printer"
 	"epos-proxy/internal/testutil"
@@ -589,7 +592,7 @@ func TestFinishTraceDoesNotBlockHandler(t *testing.T) {
 	tr.MarkQueued()
 
 	started := time.Now()
-	finishTrace(tr, "", nil)
+	finishTrace(tr, "", nil, func(tr *trace.Trace) { tr.Log() })
 	elapsed := time.Since(started)
 
 	if elapsed >= 150*time.Millisecond {
@@ -821,75 +824,113 @@ func TestTraceTransport_CUPSModeIsReported(t *testing.T) {
 
 // C7: a client that cancelled before submission must not invoke lp, even when
 // queue validation is cached (the server seam bypasses any macOS requirement).
-func TestPrintData_CUPSModeCancelledBeforeSubmitDoesNotCallLP(t *testing.T) {
-	previous := submitCUPS
-	t.Cleanup(func() { submitCUPS = previous })
-	calls := 0
-	submitCUPS = func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
-		calls++
-		return 1, nil
-	}
+const cupsImageBody = `<epos-print><image width="8" height="1">AA==</image><cut /></epos-print>`
 
-	port := testutil.GetFreePort(t)
-	s := New(port, printer.NewManager(), AccessPolicy{
+func cupsPolicy() AccessPolicy {
+	return AccessPolicy{
 		LANImageMode: func(string) string { return "cups_driver" },
 		LANCUPSQueue: func(string) string { return "TMTIENDA" },
-	})
-	defer s.Stop()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	id := printer.EncodeLANPrinterID("127.0.0.1")
-	req := httptest.NewRequest(http.MethodPost,
-		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id),
-		bytes.NewBufferString(`<epos-print><image width="8" height="1">AA==</image><cut /></epos-print>`)).WithContext(ctx)
-	if _, err := testResponse(s, req); err != nil {
-		t.Fatal(err)
-	}
-	if calls != 0 {
-		t.Fatalf("a cancelled request must not reach lp, got %d submissions", calls)
 	}
 }
 
-// C10 (server side): a CUPS receipt is submitted exactly once through the
-// server path and the success response is returned without a second transport.
-func TestPrintData_CUPSModeSubmitsOnce(t *testing.T) {
-	previous := submitCUPS
-	t.Cleanup(func() { submitCUPS = previous })
-	calls := 0
-	submitCUPS = func(_ context.Context, ip, queue string, img *escpos.CUPSImage) (int, error) {
-		calls++
-		if ip != "127.0.0.1" || queue != "TMTIENDA" || img == nil || img.Width != 8 {
-			t.Fatalf("unexpected CUPS submission ip=%q queue=%q img=%+v", ip, queue, img)
-		}
-		return 42, nil
+func testHandlerWithDeps(policy AccessPolicy, deps handlerDeps) *Server {
+	return &Server{app: newHTTPHandlerWithDeps(printer.NewManager(), policy, deps)}
+}
+
+func waitTrace(t *testing.T, traces <-chan *trace.Trace) *trace.Trace {
+	t.Helper()
+	select {
+	case tr := <-traces:
+		return tr
+	case <-time.After(2 * time.Second):
+		t.Fatal("trace was not emitted")
+		return nil
 	}
+}
 
-	port := testutil.GetFreePort(t)
-	s := New(port, printer.NewManager(), AccessPolicy{
-		LANImageMode: func(string) string { return "cups_driver" },
-		LANCUPSQueue: func(string) string { return "TMTIENDA" },
-	})
-	defer s.Stop()
-
+// Server -> CUPS positive path: exactly one submission, the ePOS response and
+// the emitted trace line (transport=cups, request_id, body_sha256, cups_lp_ms).
+func TestPrintData_CUPSModeEmitsCUPSTrace(t *testing.T) {
+	traces := make(chan *trace.Trace, 1)
+	deps := handlerDeps{
+		submitCUPS: func(ctx context.Context, ip, queue string, img *escpos.CUPSImage) (int, error) {
+			if ctx.Err() != nil {
+				t.Fatal("submitter received an already cancelled context")
+			}
+			if ip != "127.0.0.1" || queue != "TMTIENDA" {
+				t.Fatalf("unexpected destination ip=%q queue=%q", ip, queue)
+			}
+			if img == nil || img.Width != 8 || img.Height != 1 || !img.Cut {
+				t.Fatalf("unexpected image: %+v", img)
+			}
+			return 42, nil
+		},
+		emitTrace: func(tr *trace.Trace) { traces <- tr },
+	}
+	s := testHandlerWithDeps(cupsPolicy(), deps)
 	id := printer.EncodeLANPrinterID("127.0.0.1")
 	req := httptest.NewRequest(http.MethodPost,
-		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id),
-		bytes.NewBufferString(`<epos-print><image width="8" height="1">AA==</image><cut /></epos-print>`))
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(cupsImageBody))
+	req.Header.Set(requestIDHeader, "cups-req-1")
 	resp, err := testResponse(s, req)
 	testutil.ExpectedNoError(t, err)
 	body, err := io.ReadAll(resp.Body)
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedContains(t, string(body), `success="true"`)
-	if calls != 1 {
-		t.Fatalf("expected exactly one CUPS submission, got %d", calls)
+
+	line := waitTrace(t, traces).Line()
+	for _, want := range []string{
+		"transport=cups",
+		"request_id=cups-req-1",
+		"body_sha256=" + trace.Fingerprint([]byte(cupsImageBody)),
+		"cups_lp_ms=",
+	} {
+		testutil.ExpectedContains(t, line, want)
 	}
 }
 
-// A CUPS failure is returned to Odoo with one attempt and no ESC/POS fallback.
+// H1/C7: a request cancelled before submission makes zero CUPS calls, emits a
+// before-enqueue cancellation trace, and does not return a success response.
+func TestPrintData_CUPSModeCancelledBeforeSubmitDoesNotCallLP(t *testing.T) {
+	traces := make(chan *trace.Trace, 1)
+	calls := 0
+	deps := handlerDeps{
+		submitCUPS: func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
+			calls++
+			return 1, nil
+		},
+		emitTrace: func(tr *trace.Trace) { traces <- tr },
+	}
+	s := testHandlerWithDeps(cupsPolicy(), deps)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(cupsImageBody)).WithContext(ctx)
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	if strings.Contains(string(body), `success="true"`) {
+		t.Fatalf("a cancelled request must not simulate acceptance: %s", body)
+	}
+	if calls != 0 {
+		t.Fatalf("a cancelled request must not reach lp, got %d submissions", calls)
+	}
+	line := waitTrace(t, traces).Line()
+	for _, want := range []string{
+		"client_canceled=true",
+		"cancel_stage=" + trace.CancelStageBeforeEnqueue,
+		"status=error",
+	} {
+		testutil.ExpectedContains(t, line, want)
+	}
+}
+
+// Error/timeout from the submitter: one attempt, coherent error response and no
+// ESC/POS fallback.
 func TestPrintData_CUPSModeFailureHasNoFallback(t *testing.T) {
-	previous := submitCUPS
-	t.Cleanup(func() { submitCUPS = previous })
 	var connections atomic.Int32
 	if _, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
 		connections.Add(1)
@@ -897,23 +938,19 @@ func TestPrintData_CUPSModeFailureHasNoFallback(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	traces := make(chan *trace.Trace, 1)
 	calls := 0
-	submitCUPS = func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
-		calls++
-		return 0, errors.New("lp rejected the job")
+	deps := handlerDeps{
+		submitCUPS: func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
+			calls++
+			return 0, errors.New("lp rejected the job")
+		},
+		emitTrace: func(tr *trace.Trace) { traces <- tr },
 	}
-
-	port := testutil.GetFreePort(t)
-	s := New(port, printer.NewManager(), AccessPolicy{
-		LANImageMode: func(string) string { return "cups_driver" },
-		LANCUPSQueue: func(string) string { return "TMTIENDA" },
-	})
-	defer s.Stop()
-
+	s := testHandlerWithDeps(cupsPolicy(), deps)
 	id := printer.EncodeLANPrinterID("127.0.0.1")
 	req := httptest.NewRequest(http.MethodPost,
-		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id),
-		bytes.NewBufferString(`<epos-print><image width="8" height="1">AA==</image><cut /></epos-print>`))
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(cupsImageBody))
 	resp, err := testResponse(s, req)
 	testutil.ExpectedNoError(t, err)
 	body, err := io.ReadAll(resp.Body)
@@ -923,8 +960,111 @@ func TestPrintData_CUPSModeFailureHasNoFallback(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("a failed CUPS job must not be retried or fall back, got %d submissions", calls)
 	}
-	time.Sleep(50 * time.Millisecond)
+	line := waitTrace(t, traces).Line()
+	testutil.ExpectedContains(t, line, "transport=cups")
+	testutil.ExpectedContains(t, line, "status=error")
 	if connections.Load() != 0 {
 		t.Fatalf("CUPS failure fell back to direct ESC/POS: %d connection(s)", connections.Load())
 	}
+}
+
+// Cancellation after the submitter has started: the detached submission
+// finishes once, the trace records the after-write cancellation and nothing is
+// resent.
+func TestPrintData_CUPSModeCancelAfterSubmitStarted(t *testing.T) {
+	traces := make(chan *trace.Trace, 1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	calls := 0
+	deps := handlerDeps{
+		submitCUPS: func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
+			calls++
+			close(started)
+			<-release
+			return 42, nil
+		},
+		emitTrace: func(tr *trace.Trace) { traces <- tr },
+	}
+	s := testHandlerWithDeps(cupsPolicy(), deps)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(cupsImageBody)).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		_, _ = testResponse(s, req)
+		close(done)
+	}()
+	<-started
+	cancel()
+	close(release)
+	<-done
+
+	if calls != 1 {
+		t.Fatalf("expected exactly one submission, got %d", calls)
+	}
+	line := waitTrace(t, traces).Line()
+	for _, want := range []string{
+		"transport=cups",
+		"status=ok",
+		"client_canceled=true",
+		"cancel_stage=" + trace.CancelStageAfterWrite,
+	} {
+		testutil.ExpectedContains(t, line, want)
+	}
+}
+
+// A mixed/pulse job never calls the CUPS submitter and keeps the direct LAN
+// transport in the emitted trace.
+func TestPrintData_CUPSModeMixedJobKeepsDirectTransport(t *testing.T) {
+	if _, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
+		defer conn.Close()
+		data := make([]byte, 256)
+		_, _ = conn.Read(data)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	traces := make(chan *trace.Trace, 1)
+	calls := 0
+	deps := handlerDeps{
+		submitCUPS: func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
+			calls++
+			return 1, nil
+		},
+		emitTrace: func(tr *trace.Trace) { traces <- tr },
+	}
+	s := testHandlerWithDeps(cupsPolicy(), deps)
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(`<epos-print><pulse /></epos-print>`))
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `success="true"`)
+	if calls != 0 {
+		t.Fatalf("a mixed/pulse job must not call CUPS, got %d", calls)
+	}
+	line := waitTrace(t, traces).Line()
+	testutil.ExpectedContains(t, line, "transport=lan")
+}
+
+// The production submitter keeps the macOS guard: outside macOS the real
+// cups.Submit path is still refused, without substituting the dependency.
+func TestPrintData_CUPSModeRealSubmitterRefusesOutsideDarwin(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("requires a non-macOS host")
+	}
+	s := testHandlerWithDeps(cupsPolicy(), handlerDeps{submitCUPS: cups.Submit, emitTrace: func(*trace.Trace) {}})
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(cupsImageBody))
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `success="false"`)
+	testutil.ExpectedContains(t, string(body), `EX_BADPORT`)
 }

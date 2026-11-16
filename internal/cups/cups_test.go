@@ -260,25 +260,111 @@ func TestSubmit_UsesVerifiedProfileAndCustomMedia(t *testing.T) {
 	}
 }
 
-func TestSubmit_SubmissionSurvivesClientCancellation(t *testing.T) {
-	stubDarwin(t)
+func cupsTestImage() *escpos.CUPSImage {
+	return &escpos.CUPSImage{Width: 8, Height: 1, Bitmap: []byte{0x00}}
+}
+
+func stubVerifiedQueue(t *testing.T) {
+	t.Helper()
+	ForgetQueue("TMTIENDA")
 	listQueues = func(context.Context) ([]byte, error) {
 		return []byte("device for TMTIENDA: socket://192.168.12.33:9100\n"), nil
 	}
 	queueOptions = func(context.Context, string) ([]byte, error) {
 		return []byte(verifiedQueueOptions), nil
 	}
-	submitLP = func(ctx context.Context, args []string) ([]byte, error) {
+}
+
+// A context cancelled before the job is committed never invokes lp: cold cache
+// (first check) and warm cache (last check before the commitment boundary).
+func TestSubmit_CancelledBeforeCommitDoesNotInvokeLP(t *testing.T) {
+	for _, warm := range []bool{false, true} {
+		name := "cold cache"
+		if warm {
+			name = "warm cache"
+		}
+		t.Run(name, func(t *testing.T) {
+			stubDarwin(t)
+			stubVerifiedQueue(t)
+			if warm {
+				if _, err := VerifiedQueue(context.Background(), "192.168.12.33", "TMTIENDA"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls := 0
+			submitLP = func(context.Context, []string) ([]byte, error) {
+				calls++
+				return nil, nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if _, err := Submit(ctx, "192.168.12.33", "TMTIENDA", cupsTestImage()); !errors.Is(err, context.Canceled) {
+				t.Fatalf("expected context.Canceled, got %v", err)
+			}
+			if calls != 0 {
+				t.Fatalf("a cancelled request reached lp %d time(s)", calls)
+			}
+		})
+	}
+}
+
+// A cancellation that arrives while the PNG/file is being prepared is also
+// honoured before the commitment boundary.
+func TestSubmit_CancelledDuringPreparationDoesNotInvokeLP(t *testing.T) {
+	stubDarwin(t)
+	ForgetQueue("TMTIENDA")
+	ctx, cancel := context.WithCancel(context.Background())
+	listQueues = func(context.Context) ([]byte, error) {
+		return []byte("device for TMTIENDA: socket://192.168.12.33:9100\n"), nil
+	}
+	queueOptions = func(context.Context, string) ([]byte, error) {
+		cancel() // cancellation lands after queue inspection, before lp
+		return []byte(verifiedQueueOptions), nil
+	}
+	calls := 0
+	submitLP = func(context.Context, []string) ([]byte, error) {
+		calls++
+		return nil, nil
+	}
+	if _, err := Submit(ctx, "192.168.12.33", "TMTIENDA", cupsTestImage()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("a request cancelled during preparation reached lp %d time(s)", calls)
+	}
+}
+
+// Once lp has started, the detached submission finishes exactly once even if
+// the HTTP request is cancelled; the parent cancellation must not kill lp.
+func TestSubmit_CancellationAfterLPStartsKeepsOneAttempt(t *testing.T) {
+	stubDarwin(t)
+	stubVerifiedQueue(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	calls := 0
+	submitLP = func(ctx context.Context, _ []string) ([]byte, error) {
+		calls++
+		close(started)
+		<-release
 		if ctx.Err() != nil {
-			t.Fatalf("lp was started with an already canceled context")
+			t.Errorf("lp context was cancelled after the commitment boundary")
 		}
 		return nil, nil
 	}
-	canceled, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := Submit(ctx, "192.168.12.33", "TMTIENDA", cupsTestImage())
+		done <- err
+	}()
+	<-started
 	cancel()
-	img := &escpos.CUPSImage{Width: 8, Height: 1, Bitmap: []byte{0x00}}
-	if _, err := Submit(canceled, "192.168.12.33", "TMTIENDA", img); err != nil {
-		t.Fatalf("a canceled client must not abort an already-authorized submission: %v", err)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("submission already started must finish: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected exactly one lp attempt, got %d", calls)
 	}
 }
 

@@ -208,6 +208,10 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 }
 
 func newHTTPHandler(mgr *printer.Manager, policy AccessPolicy) http.Handler {
+	return newHTTPHandlerWithDeps(mgr, policy, productionDeps())
+}
+
+func newHTTPHandlerWithDeps(mgr *printer.Manager, policy AccessPolicy, deps handlerDeps) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
@@ -246,16 +250,16 @@ func newHTTPHandler(mgr *printer.Manager, policy AccessPolicy) http.Handler {
 	mux.HandleFunc("POST /p/{printerId}/cgi-bin/epos/service.cgi", func(w http.ResponseWriter, r *http.Request) {
 		printerID := r.PathValue("printerId")
 		logger.Infof("Print request received for printer: %s", printerID)
-		printData(mgr, w, r, printerID, policy)
+		printData(mgr, w, r, printerID, policy, deps)
 	})
 	mux.HandleFunc("POST /cgi-bin/epos/service.cgi", func(w http.ResponseWriter, r *http.Request) {
 		logger.Infof("Print request received (auto printer selection)")
-		printData(mgr, w, r, "", policy)
+		printData(mgr, w, r, "", policy, deps)
 	})
 	mux.HandleFunc("POST /p/{printerId}/pstprnt", func(w http.ResponseWriter, r *http.Request) {
 		printerID := r.PathValue("printerId")
 		logger.Infof("Label print request received for printer: %s", printerID)
-		printLabel(mgr, w, r, printerID)
+		printLabel(mgr, w, r, printerID, deps)
 	})
 
 	return withRecovery(withRequestLogging(withAccessPolicy(withCORS(mux), policy)))
@@ -382,13 +386,13 @@ func printTransport(printerID string) string {
 // for the device close in the handler would delay the response Odoo reads.
 // Settling in a goroutine keeps the client latency identical to the
 // non-instrumented build; the goroutine is bounded by SettleTimeout.
-func finishTrace(tr *trace.Trace, code string, jobErr error) {
+func finishTrace(tr *trace.Trace, code string, jobErr error, emit func(*trace.Trace)) {
 	tr.SetCode(code)
 	tr.SetError(jobErr)
 	tr.SetTotal(time.Since(tr.RecvAt()))
 	go func() {
 		tr.Settle(trace.SettleTimeout)
-		tr.Log()
+		emit(tr)
 	}()
 }
 
@@ -476,12 +480,22 @@ func resolveImageMode(printerID string, policy AccessPolicy) escpos.ImageMode {
 	return escpos.ImageModeLegacy
 }
 
-// submitCUPS is a narrow test seam for the server-to-CUPS path. Production
-// always calls cups.Submit; tests replace it to verify cancellation and
-// no-retry behavior on Linux without a macOS queue.
-var submitCUPS = cups.Submit
+// handlerDeps holds the per-handler dependencies. Production builds them with
+// the real CUPS submitter and trace logger; tests inject a fake submitter and
+// an internal trace sink without changing the production platform guard.
+type handlerDeps struct {
+	submitCUPS func(context.Context, string, string, *escpos.CUPSImage) (int, error)
+	emitTrace  func(*trace.Trace)
+}
 
-func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string, policy AccessPolicy) {
+func productionDeps() handlerDeps {
+	return handlerDeps{
+		submitCUPS: cups.Submit,
+		emitTrace:  func(tr *trace.Trace) { tr.Log() },
+	}
+}
+
+func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string, policy AccessPolicy, deps handlerDeps) {
 	mode := resolveImageMode(printerID, policy)
 	tr := newTicketTrace(w, r, printerID, trace.KindReceipt, traceTransport(printerID, mode))
 
@@ -496,7 +510,7 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 		if errors.As(err, &maxErr) {
 			code = "PayloadTooLarge"
 		}
-		finishTrace(tr, code, err)
+		finishTrace(tr, code, err, deps.emitTrace)
 		return
 	}
 
@@ -511,7 +525,7 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 		if imageErr != nil {
 			logger.Errorf("CUPS image parsing failed: %v", imageErr)
 			writeEPOSResponse(w, EPOSResponse{Success: false, Code: "SchemaError"})
-			finishTrace(tr, "SchemaError", imageErr)
+			finishTrace(tr, "SchemaError", imageErr, deps.emitTrace)
 			return
 		}
 		if img != nil {
@@ -524,7 +538,7 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 					Code:    "EX_BADPORT",
 					Status:  "Epson CUPS mode is enabled without a verified queue",
 				})
-				finishTrace(tr, "EX_BADPORT", err)
+				finishTrace(tr, "EX_BADPORT", err, deps.emitTrace)
 				return
 			}
 			queue := policy.LANCUPSQueue(ip)
@@ -535,11 +549,11 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 				// A client that cancelled before submission must not reach lp at
 				// all, even when queue validation is cached. Nothing was sent.
 				noteClientCanceled(tr, trace.CancelStageBeforeEnqueue, printerID, ctxErr)
-				finishTrace(tr, clientCanceledCode, ctxErr)
+				finishTrace(tr, clientCanceledCode, ctxErr, deps.emitTrace)
 				return
 			}
 			printStarted := time.Now()
-			pngSize, err := submitCUPS(r.Context(), ip, queue, img)
+			pngSize, err := deps.submitCUPS(r.Context(), ip, queue, img)
 			tr.SetCUPS(time.Since(printStarted), 0)
 			logger.Infof("Print timing printer=%s imageMode=cups_driver queue=%s xmlBytes=%d pngBytes=%d width=%d height=%d parse=%s cupsSubmit=%s request_id=%s",
 				printerID, queue, len(body), pngSize, img.Width, img.Height, parseElapsed, time.Since(printStarted), tr.ID())
@@ -558,11 +572,11 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 					Code:    "EX_BADPORT",
 					Status:  "Epson CUPS submission failed; check the Mac queue before retrying",
 				})
-				finishTrace(tr, "EX_BADPORT", err)
+				finishTrace(tr, "EX_BADPORT", err, deps.emitTrace)
 				return
 			}
 			writeEPOSResponse(w, EPOSResponse{Success: true})
-			finishTrace(tr, "", nil)
+			finishTrace(tr, "", nil, deps.emitTrace)
 			return
 		}
 		// A mixed job (for example image plus <pulse/>) cannot be reproduced
@@ -581,14 +595,14 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 	if err != nil {
 		logger.Errorf("XML parsing error: %v request_id=%s", err, tr.ID())
 		writeEPOSResponse(w, EPOSResponse{Success: false, Code: "SchemaError", Status: ""})
-		finishTrace(tr, "SchemaError", err)
+		finishTrace(tr, "SchemaError", err, deps.emitTrace)
 		return
 	}
 
 	sendStarted := time.Now()
 	err, dropped := runPrintJob(r.Context(), mgr, printerID, jobData, tr)
 	if dropped || errors.Is(err, printer.ErrCanceled) {
-		finishTrace(tr, clientCanceledCode, err)
+		finishTrace(tr, clientCanceledCode, err, deps.emitTrace)
 		return
 	}
 	logger.Infof("Print timing printer=%s imageMode=%s xmlBytes=%d escposBytes=%d parse=%s queueAndSend=%s",
@@ -601,7 +615,7 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 		}
 		logger.Errorf("Print error [%s]: %v, Printer ID: %s request_id=%s", retCode, err, printerID, tr.ID())
 		writeEPOSResponse(w, EPOSResponse{Success: false, Code: retCode, Status: ""})
-		finishTrace(tr, retCode, err)
+		finishTrace(tr, retCode, err, deps.emitTrace)
 		return
 	}
 
@@ -610,10 +624,10 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 	if ctxErr := r.Context().Err(); ctxErr != nil {
 		noteClientCanceled(tr, trace.CancelStageAfterWrite, printerID, ctxErr)
 	}
-	finishTrace(tr, "", nil)
+	finishTrace(tr, "", nil, deps.emitTrace)
 }
 
-func printLabel(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string) {
+func printLabel(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string, deps handlerDeps) {
 	tr := newTicketTrace(w, r, printerID, trace.KindLabel, printTransport(printerID))
 	tr.SetImageMode(trace.ImageModeRaw)
 
@@ -622,31 +636,31 @@ func printLabel(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pr
 	tr.SetBody(time.Since(bodyStarted), len(jobData))
 	tr.SetFingerprint(trace.Fingerprint(jobData))
 	if err != nil {
-		finishTrace(tr, "BadRequest", err)
+		finishTrace(tr, "BadRequest", err, deps.emitTrace)
 		return
 	}
 	if len(jobData) == 0 {
 		logger.Warn("Empty label data received")
 		http.Error(w, "Empty label data", http.StatusBadRequest)
-		finishTrace(tr, "EmptyLabel", errEmptyLabel)
+		finishTrace(tr, "EmptyLabel", errEmptyLabel, deps.emitTrace)
 		return
 	}
 
 	err, dropped := runPrintJob(r.Context(), mgr, printerID, jobData, tr)
 	if dropped || errors.Is(err, printer.ErrCanceled) {
-		finishTrace(tr, clientCanceledCode, err)
+		finishTrace(tr, clientCanceledCode, err, deps.emitTrace)
 		return
 	}
 	if err != nil {
 		if errors.Is(err, printer.ErrQueueFull) {
 			logger.Warnf("Printer queue full, Printer ID: %s request_id=%s", printerID, tr.ID())
 			http.Error(w, "Printer queue full", http.StatusTooManyRequests)
-			finishTrace(tr, "TooManyRequests", err)
+			finishTrace(tr, "TooManyRequests", err, deps.emitTrace)
 			return
 		}
 		logger.Errorf("Print error: %v, Printer ID: %s request_id=%s", err, printerID, tr.ID())
 		http.Error(w, "Printer error", http.StatusInternalServerError)
-		finishTrace(tr, "EX_BADPORT", err)
+		finishTrace(tr, "EX_BADPORT", err, deps.emitTrace)
 		return
 	}
 
@@ -655,7 +669,7 @@ func printLabel(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pr
 	if ctxErr := r.Context().Err(); ctxErr != nil {
 		noteClientCanceled(tr, trace.CancelStageAfterWrite, printerID, ctxErr)
 	}
-	finishTrace(tr, "", nil)
+	finishTrace(tr, "", nil, deps.emitTrace)
 }
 
 func (s *Server) StartError() error {

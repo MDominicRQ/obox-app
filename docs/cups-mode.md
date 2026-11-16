@@ -42,8 +42,10 @@ values.
   A queue without custom media support refuses the ticket instead of cropping
   it.
 - Options not present in the PPD are never forced. `-o raw` is never used.
-- Cancellation: a request cancelled **before** submission never invokes `lp`;
-  once a job is handed to `lp` it finishes even if Odoo aborts the HTTP request.
+- Cancellation: the request context is checked before submission and again
+  immediately before `lp` starts, so a request cancelled during queue
+  inspection, PNG encoding or temporary-file preparation never invokes `lp`.
+  Once a job is handed to `lp` it finishes even if Odoo aborts the HTTP request.
 - Failures are never re-sent through ESC/POS and never trigger a second `lp`
   attempt.
 
