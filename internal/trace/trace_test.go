@@ -198,6 +198,19 @@ func TestDetectImageModeParsedLegacyBitmap(t *testing.T) {
 	testutil.ExpectedEqual(t, DetectImageMode(jobData), ImageModeLegacy)
 }
 
+// TestDetectImageModeEpsonGraphicsStream checks the opt-in GS ( L path added by
+// PR #3 against the trace classifier: a real generated stream must report gs_l,
+// not legacy.
+func TestDetectImageModeEpsonGraphicsStream(t *testing.T) {
+	jobData, err := escpos.ParseXMLWithMode(
+		[]byte(`<epos-print><image width="24" height="2">/wAA/wAA</image></epos-print>`),
+		escpos.ImageModeEpsonGraphics,
+	)
+	testutil.ExpectedNoError(t, err)
+
+	testutil.ExpectedEqual(t, DetectImageMode(jobData), ImageModeGSL)
+}
+
 func TestRasterSize(t *testing.T) {
 	tests := []struct {
 		name     string
