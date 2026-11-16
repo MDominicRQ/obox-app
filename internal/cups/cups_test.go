@@ -3,6 +3,8 @@ package cups
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"image/png"
 	"reflect"
 	"strings"
@@ -277,5 +279,54 @@ func TestSubmit_SubmissionSurvivesClientCancellation(t *testing.T) {
 	img := &escpos.CUPSImage{Width: 8, Height: 1, Bitmap: []byte{0x00}}
 	if _, err := Submit(canceled, "192.168.12.33", "TMTIENDA", img); err != nil {
 		t.Fatalf("a canceled client must not abort an already-authorized submission: %v", err)
+	}
+}
+
+// Labelled simulated CUPS rejection: the job is reported to Odoo and never
+// resubmitted, because a rejected or ambiguous job could still be queued.
+func TestSubmit_RejectionIsReportedWithoutResend(t *testing.T) {
+	stubDarwin(t)
+	listQueues = func(context.Context) ([]byte, error) {
+		return []byte("device for TMTIENDA: socket://192.168.12.33:9100\n"), nil
+	}
+	queueOptions = func(context.Context, string) ([]byte, error) {
+		return []byte(verifiedQueueOptions), nil
+	}
+	calls := 0
+	submitLP = func(context.Context, []string) ([]byte, error) {
+		calls++
+		return []byte("lp: The printer or class does not exist."), fmt.Errorf("exit status 1")
+	}
+	img := &escpos.CUPSImage{Width: 8, Height: 1, Bitmap: []byte{0x00}}
+	_, err := Submit(context.Background(), "192.168.12.33", "TMTIENDA", img)
+	if err == nil || !strings.Contains(err.Error(), "rejected job") {
+		t.Fatalf("rejection must be surfaced to the caller, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("a rejected job must not be resent, got %d submissions", calls)
+	}
+}
+
+// Labelled simulated CUPS timeout: an ambiguous acceptance is never retried.
+func TestSubmit_TimeoutIsReportedWithoutResend(t *testing.T) {
+	stubDarwin(t)
+	listQueues = func(context.Context) ([]byte, error) {
+		return []byte("device for TMTIENDA: socket://192.168.12.33:9100\n"), nil
+	}
+	queueOptions = func(context.Context, string) ([]byte, error) {
+		return []byte(verifiedQueueOptions), nil
+	}
+	calls := 0
+	submitLP = func(context.Context, []string) ([]byte, error) {
+		calls++
+		return nil, context.DeadlineExceeded
+	}
+	img := &escpos.CUPSImage{Width: 8, Height: 1, Bitmap: []byte{0x00}}
+	_, err := Submit(context.Background(), "192.168.12.33", "TMTIENDA", img)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timeout must be surfaced to the caller, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("an ambiguous timeout must not trigger a resend, got %d submissions", calls)
 	}
 }
