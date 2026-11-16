@@ -2,6 +2,8 @@
 
 ePOS Proxy exposes both HTTP and HTTPS while keeping the actual USB/LAN printer path unchanged.
 
+See [Printing modes, benchmark and rollout](printing-modes.md) for the canonical decision tree, the `legacy` / `GS ( L` / CUPS selection, rollback and known limitations. This page covers the app-specific addresses, listeners and certificate storage.
+
 - **HTTP / LNA** is the recommended path for Odoo 19 on current Chromium browsers.
 - **HTTPS / Legacy** remains available for older macOS/browser combinations.
 - Closing the application window does **not** stop the proxy. The window is hidden and the HTTP/HTTPS listeners continue running in the background.
@@ -149,6 +151,8 @@ The LAN printer result is especially important on macOS 15+: it verifies the pat
 For CI/testing, the generated app is currently ad-hoc signed. Apple recommends an Apple-issued signing identity for reliable Local Network privacy identity tracking across builds. A production distribution should therefore use Developer ID signing/notarization rather than relying permanently on ad-hoc signing.
 
 ## Troubleshooting
+
+Choose the address and mode with the [printing modes decision tree](printing-modes.md#6-decision-tree); the items below cover the app-specific checks.
 
 1. Keep ePOS Proxy running; closing the window is safe, but **App → Quit** stops printing.
 2. Confirm the in-app **Test** button prints. It intentionally uses the local HTTP proxy and validates the proxy-to-printer path.
