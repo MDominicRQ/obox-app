@@ -3,12 +3,15 @@
 **Status:** draft for technical review, **not yet adopted** · **Updated:** 2026-11-16 · **Scope:** Obox-app
 (ePOS Proxy) and Odoo 19 on macOS 10.15–26 with Epson TM-T88 IV, V, VI and VII.
 
-**Software snapshot:** candidate branch `integration/ds8-candidate`, PR #9,
-code base `de54973` plus this documentation change in the same head. It
-integrates the reviewed `GS ( L` fix (`8edd998`), the opt-in CUPS route with
-per-queue profile validation, and the Q1–Q3 review fixes. It is still an
-intermediate draft: no macOS build, physical benchmark or final QA verdict
-exists yet, and any later head change invalidates a prior review.
+**Software snapshot:** candidate branch `integration/ds8-candidate`, PR #9.
+The consolidated head integrates the reviewed `GS ( L` fix (`8edd998`), the
+opt-in CUPS route with per-queue profile validation, the Q1–Q3 review fixes,
+the GS ( L boundary regressions, the pre-submission cancellation guard and this
+document. The final SHA, CI/build links and file hashes are recorded in the
+delivery manifest on DS-2, not embedded here, so this draft does not have to be
+rewritten to name its own commit. It remains an intermediate draft: no macOS
+build, physical benchmark or final QA verdict exists yet, and any later head
+change invalidates a prior review.
 
 This document is the **proposed single reference** for choosing a printing mode,
 preparing a benchmark, trusting the local CA in Firefox, and rolling back. It
