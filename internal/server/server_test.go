@@ -852,8 +852,10 @@ func waitTrace(t *testing.T, traces <-chan *trace.Trace) *trace.Trace {
 // the emitted trace line (transport=cups, request_id, body_sha256, cups_lp_ms).
 func TestPrintData_CUPSModeEmitsCUPSTrace(t *testing.T) {
 	traces := make(chan *trace.Trace, 1)
+	calls := 0
 	deps := handlerDeps{
 		submitCUPS: func(ctx context.Context, ip, queue string, img *escpos.CUPSImage) (int, error) {
+			calls++
 			if ctx.Err() != nil {
 				t.Fatal("submitter received an already cancelled context")
 			}
@@ -862,6 +864,10 @@ func TestPrintData_CUPSModeEmitsCUPSTrace(t *testing.T) {
 			}
 			if img == nil || img.Width != 8 || img.Height != 1 || !img.Cut {
 				t.Fatalf("unexpected image: %+v", img)
+			}
+			// Spin briefly so cups_lp_ms is a measured, non-zero duration.
+			until := time.Now().Add(200 * time.Microsecond)
+			for time.Now().Before(until) {
 			}
 			return 42, nil
 		},
@@ -878,14 +884,20 @@ func TestPrintData_CUPSModeEmitsCUPSTrace(t *testing.T) {
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedContains(t, string(body), `success="true"`)
 
+	if calls != 1 {
+		t.Fatalf("expected exactly one CUPS submission, got %d", calls)
+	}
+
 	line := waitTrace(t, traces).Line()
 	for _, want := range []string{
 		"transport=cups",
 		"request_id=cups-req-1",
 		"body_sha256=" + trace.Fingerprint([]byte(cupsImageBody)),
-		"cups_lp_ms=",
 	} {
 		testutil.ExpectedContains(t, line, want)
+	}
+	if strings.Contains(line, "cups_lp_ms=-") || !strings.Contains(line, "cups_lp_ms=") {
+		t.Fatalf("cups_lp_ms must be measured, got %q", line)
 	}
 }
 
@@ -929,42 +941,65 @@ func TestPrintData_CUPSModeCancelledBeforeSubmitDoesNotCallLP(t *testing.T) {
 }
 
 // Error/timeout from the submitter: one attempt, coherent error response and no
-// ESC/POS fallback.
 func TestPrintData_CUPSModeFailureHasNoFallback(t *testing.T) {
-	var connections atomic.Int32
-	if _, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
-		connections.Add(1)
-		_ = conn.Close()
-	}); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name    string
+		err     error
+		wantMsg string
+	}{
+		{"rejection", errors.New("lp rejected the job"), "lp rejected the job"},
+		{"timeout", context.DeadlineExceeded, "context deadline exceeded"},
 	}
-	traces := make(chan *trace.Trace, 1)
-	calls := 0
-	deps := handlerDeps{
-		submitCUPS: func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
-			calls++
-			return 0, errors.New("lp rejected the job")
-		},
-		emitTrace: func(tr *trace.Trace) { traces <- tr },
-	}
-	s := testHandlerWithDeps(cupsPolicy(), deps)
-	id := printer.EncodeLANPrinterID("127.0.0.1")
-	req := httptest.NewRequest(http.MethodPost,
-		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(cupsImageBody))
-	resp, err := testResponse(s, req)
-	testutil.ExpectedNoError(t, err)
-	body, err := io.ReadAll(resp.Body)
-	testutil.ExpectedNoError(t, err)
-	testutil.ExpectedContains(t, string(body), `success="false"`)
-	testutil.ExpectedContains(t, string(body), `EX_BADPORT`)
-	if calls != 1 {
-		t.Fatalf("a failed CUPS job must not be retried or fall back, got %d submissions", calls)
-	}
-	line := waitTrace(t, traces).Line()
-	testutil.ExpectedContains(t, line, "transport=cups")
-	testutil.ExpectedContains(t, line, "status=error")
-	if connections.Load() != 0 {
-		t.Fatalf("CUPS failure fell back to direct ESC/POS: %d connection(s)", connections.Load())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			connected := make(chan struct{}, 1)
+			var connections atomic.Int32
+			if _, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
+				connections.Add(1)
+				select {
+				case connected <- struct{}{}:
+				default:
+				}
+				_ = conn.Close()
+			}); err != nil {
+				t.Fatal(err)
+			}
+			traces := make(chan *trace.Trace, 1)
+			calls := 0
+			deps := handlerDeps{
+				submitCUPS: func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
+					calls++
+					return 0, tc.err
+				},
+				emitTrace: func(tr *trace.Trace) { traces <- tr },
+			}
+			s := testHandlerWithDeps(cupsPolicy(), deps)
+			id := printer.EncodeLANPrinterID("127.0.0.1")
+			req := httptest.NewRequest(http.MethodPost,
+				fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(cupsImageBody))
+			resp, err := testResponse(s, req)
+			testutil.ExpectedNoError(t, err)
+			body, err := io.ReadAll(resp.Body)
+			testutil.ExpectedNoError(t, err)
+			testutil.ExpectedContains(t, string(body), `success="false"`)
+			testutil.ExpectedContains(t, string(body), `EX_BADPORT`)
+			if calls != 1 {
+				t.Fatalf("a failed CUPS job must not be retried or fall back, got %d submissions", calls)
+			}
+			line := waitTrace(t, traces).Line()
+			testutil.ExpectedContains(t, line, "transport=cups")
+			testutil.ExpectedContains(t, line, "status=error")
+			testutil.ExpectedContains(t, line, tc.wantMsg)
+
+			// The trace is emitted after the handler returns. A fallback would
+			// dial the mock listener synchronously, so a bounded signal wait is a
+			// deterministic negative assertion (no time.Sleep).
+			select {
+			case <-connected:
+				t.Fatalf("CUPS failure fell back to direct ESC/POS (%d connection(s))", connections.Load())
+			case <-time.After(150 * time.Millisecond):
+			}
+		})
 	}
 }
 
@@ -997,10 +1032,18 @@ func TestPrintData_CUPSModeCancelAfterSubmitStarted(t *testing.T) {
 		_, _ = testResponse(s, req)
 		close(done)
 	}()
-	<-started
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("submitter did not start")
+	}
 	cancel()
 	close(release)
-	<-done
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not finish")
+	}
 
 	if calls != 1 {
 		t.Fatalf("expected exactly one submission, got %d", calls)

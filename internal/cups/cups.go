@@ -58,6 +58,11 @@ var (
 	}
 )
 
+// afterPreparation is a private test seam invoked once the PNG and the
+// temporary file are ready, immediately before the final cancellation check
+// and the commitment boundary. Production leaves it nil.
+var afterPreparation func()
+
 func run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	if err != nil {
@@ -463,8 +468,13 @@ func Submit(ctx context.Context, ip, queue string, img *escpos.CUPSImage) (int, 
 	args := append([]string{"-d", queue}, options...)
 	args = append(args, path)
 
+	if afterPreparation != nil {
+		afterPreparation()
+	}
+
 	// Last check before the commitment point: a cancelled request must not
-	// produce an orphan lp job, even with a warm validation cache.
+	// produce an orphan lp job, even with a warm validation cache. A test seam
+	// lets tests cancel after this check was already passed once.
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}

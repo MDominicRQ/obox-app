@@ -310,7 +310,9 @@ func TestSubmit_CancelledBeforeCommitDoesNotInvokeLP(t *testing.T) {
 
 // A cancellation that arrives while the PNG/file is being prepared is also
 // honoured before the commitment boundary.
-func TestSubmit_CancelledDuringPreparationDoesNotInvokeLP(t *testing.T) {
+// Cancellation lands during queue inspection: the check immediately after
+// VerifiedQueue must stop the job before PNG encoding and lp.
+func TestSubmit_CancelledAfterQueueInspectionDoesNotInvokeLP(t *testing.T) {
 	stubDarwin(t)
 	ForgetQueue("TMTIENDA")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -318,7 +320,7 @@ func TestSubmit_CancelledDuringPreparationDoesNotInvokeLP(t *testing.T) {
 		return []byte("device for TMTIENDA: socket://192.168.12.33:9100\n"), nil
 	}
 	queueOptions = func(context.Context, string) ([]byte, error) {
-		cancel() // cancellation lands after queue inspection, before lp
+		cancel()
 		return []byte(verifiedQueueOptions), nil
 	}
 	calls := 0
@@ -330,7 +332,37 @@ func TestSubmit_CancelledDuringPreparationDoesNotInvokeLP(t *testing.T) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 	if calls != 0 {
-		t.Fatalf("a request cancelled during preparation reached lp %d time(s)", calls)
+		t.Fatalf("a request cancelled after queue inspection reached lp %d time(s)", calls)
+	}
+}
+
+// Cancellation lands after the post-queue check has passed and after PNG/file
+// preparation, exactly at the commitment boundary. This test fails if the final
+// guard immediately before WithoutCancel/lp is removed; no sleeps are used.
+func TestSubmit_CancelledAtCommitBoundaryDoesNotInvokeLP(t *testing.T) {
+	stubDarwin(t)
+	stubVerifiedQueue(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	before := afterPreparation
+	t.Cleanup(func() { afterPreparation = before })
+	reachedBoundary := false
+	afterPreparation = func() {
+		reachedBoundary = true
+		cancel()
+	}
+	calls := 0
+	submitLP = func(context.Context, []string) ([]byte, error) {
+		calls++
+		return nil, nil
+	}
+	if _, err := Submit(ctx, "192.168.12.33", "TMTIENDA", cupsTestImage()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if !reachedBoundary {
+		t.Fatal("test did not reach the post-preparation boundary")
+	}
+	if calls != 0 {
+		t.Fatalf("a request cancelled at the commitment boundary reached lp %d time(s)", calls)
 	}
 }
 
