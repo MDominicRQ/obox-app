@@ -230,3 +230,34 @@ func TestParseXML_RejectsExcessiveElementCount(t *testing.T) {
 		t.Fatalf("expected item-limit error, got: %v", err)
 	}
 }
+
+func TestParseXMLWithMode_UsesEpsonGraphicsOnlyForImages(t *testing.T) {
+	pixel := base64.StdEncoding.EncodeToString([]byte{0xAA})
+	doc := []byte(`<epos-print><text>Hola</text><image align="center" width="8" height="1">` + pixel +
+		`</image><cut/></epos-print>`)
+
+	got, err := ParseXMLWithMode(doc, ImageModeEpsonGraphics)
+	testutil.ExpectedNoError(t, err)
+
+	expected := append([]byte(nil), CmdInit...)
+	expected = append(expected, []byte("Hola")...)
+	expected = append(expected, ESC, 0x61, 0x01)
+	expected = append(expected,
+		GS, 0x28, 0x4C, 0x0B, 0x00, 0x30, 0x70, 0x30, 0x01,
+		0x01, 0x31, 0x08, 0x00, 0x01, 0x00, 0xAA,
+		GS, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32,
+	)
+	expected = append(expected, CmdCut...)
+	testutil.ExpectedBytesEqual(t, got, expected)
+
+	legacy, err := ParseXML(doc)
+	testutil.ExpectedNoError(t, err)
+	if bytes.Equal(legacy, got) {
+		t.Fatal("legacy and optimized raster commands must differ")
+	}
+	if !bytes.Equal(legacy[:len(CmdInit)+4], got[:len(CmdInit)+4]) {
+		t.Fatal("non-image text commands must be identical across modes")
+	}
+	_, err = ParseXMLWithMode(doc, ImageMode("invalid"))
+	testutil.ExpectedError(t, err)
+}

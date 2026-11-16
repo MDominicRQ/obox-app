@@ -298,7 +298,9 @@ func TestFailedWriteRecordsDeviceBytes(t *testing.T) {
 		wantBytes int
 	}{
 		{name: "nothing accepted", conn: &partialConn{remaining: 0}, wantBytes: 0},
-		{name: "partial ticket", conn: &partialConn{remaining: 64 * 1024}, wantBytes: 64 * 1024},
+		// LAN writes are chunked, so the failed first block is what the device
+		// accepted before the connection drop.
+		{name: "partial ticket", conn: &partialConn{remaining: lanWriteChunkSize}, wantBytes: lanWriteChunkSize},
 	}
 
 	for _, tc := range tests {

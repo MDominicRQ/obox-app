@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -25,7 +26,10 @@ const (
 const (
 	QueueSize    = 100
 	WriteTimeout = 5 * time.Second
-	ChunkSize    = 64 * 1024 // 8 KB
+	ChunkSize    = 64 * 1024 // USB transfer size only
+	// Bound each LAN write so slower printer buffers can keep making progress
+	// without imposing a single 5-second deadline on an entire large job.
+	lanWriteChunkSize = 32 * 1024
 )
 
 var (
@@ -166,20 +170,49 @@ func (p *Printer) writeContext(ctx context.Context, data []byte, tr *trace.Trace
 	logger.Debugf("Writing %d bytes to printer %s", len(data), p.idToString())
 
 	if p.connectionType == ConnKindLAN {
-		if err := p.tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-			p.closeDeviceTraced(tr)
-			return fmt.Errorf("failed to set write deadline for LAN printer %s: %w", p.idToString(), err)
-		}
+		// TCP is a byte stream: splitting writes does not alter ESC/POS data.
+		// Refresh the deadline for each chunk instead of timing out a large
+		// receipt while a slower printer drains its receive buffer.
+		totalBytes := len(data)
+		written := 0
 		writeStarted := time.Now()
-		written, err := p.tcpConn.Write(data)
-		writeDur := time.Since(writeStarted)
-		if tr != nil {
-			tr.AddWriteBlock(writeDur)
-			tr.SetWrite(writeDur, len(data), written)
+		for len(data) > 0 {
+			size := min(len(data), lanWriteChunkSize)
+			if err := p.tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+				if tr != nil {
+					tr.SetWrite(time.Since(writeStarted), totalBytes, written)
+				}
+				p.closeDeviceTraced(tr)
+				return fmt.Errorf("failed to set write deadline for LAN printer %s: %w", p.idToString(), err)
+			}
+
+			blockStarted := time.Now()
+			n, err := p.tcpConn.Write(data[:size])
+			blockDur := time.Since(blockStarted)
+
+			written += n
+			if tr != nil {
+				tr.AddWriteBlock(blockDur)
+			}
+
+			if err != nil {
+				if tr != nil {
+					tr.SetWrite(time.Since(writeStarted), totalBytes, written)
+				}
+				p.closeDeviceTraced(tr)
+				return fmt.Errorf("failed to write to LAN printer %s: %w", p.idToString(), err)
+			}
+			if n <= 0 || n > size {
+				if tr != nil {
+					tr.SetWrite(time.Since(writeStarted), totalBytes, written)
+				}
+				p.closeDeviceTraced(tr)
+				return fmt.Errorf("failed to write to LAN printer %s: %w", p.idToString(), io.ErrShortWrite)
+			}
+			data = data[n:]
 		}
-		if err != nil {
-			p.closeDeviceTraced(tr)
-			return fmt.Errorf("failed to write to LAN printer %s: %w", p.idToString(), err)
+		if tr != nil {
+			tr.SetWrite(time.Since(writeStarted), totalBytes, written)
 		}
 		logger.Debugf("Successfully wrote to LAN printer %s", p.idToString())
 		return nil

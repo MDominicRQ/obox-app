@@ -734,3 +734,18 @@ func TestCancelStageFor(t *testing.T) {
 		})
 	}
 }
+func TestResolveImageMode_OnlyConfiguredLANPrintersUseEpson(t *testing.T) {
+	lanPrinter := printer.EncodeLANPrinterID("192.168.1.55")
+	policy := AccessPolicy{
+		LANImageMode: func(ip string) string {
+			if ip == "192.168.1.55" {
+				return string(escpos.ImageModeEpsonGraphics)
+			}
+			return string(escpos.ImageModeLegacy)
+		},
+	}
+	testutil.ExpectedEqual(t, resolveImageMode(lanPrinter, policy), escpos.ImageModeEpsonGraphics)
+	testutil.ExpectedEqual(t, resolveImageMode(lanPrinter, AccessPolicy{}), escpos.ImageModeLegacy)
+	testutil.ExpectedEqual(t, resolveImageMode("", policy), escpos.ImageModeLegacy)
+	testutil.ExpectedEqual(t, resolveImageMode("USB-not-LAN", policy), escpos.ImageModeLegacy)
+}

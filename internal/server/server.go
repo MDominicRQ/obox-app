@@ -43,6 +43,7 @@ type EPOSResponse struct {
 // their historical behavior. Production passes the live application setting.
 type AccessPolicy struct {
 	NetworkPrintingEnabled func() bool
+	LANImageMode           func(string) string
 }
 
 func (p AccessPolicy) remoteAllowed() bool {
@@ -243,11 +244,11 @@ func newHTTPHandler(mgr *printer.Manager, policy AccessPolicy) http.Handler {
 	mux.HandleFunc("POST /p/{printerId}/cgi-bin/epos/service.cgi", func(w http.ResponseWriter, r *http.Request) {
 		printerID := r.PathValue("printerId")
 		logger.Infof("Print request received for printer: %s", printerID)
-		printData(mgr, w, r, printerID)
+		printData(mgr, w, r, printerID, policy)
 	})
 	mux.HandleFunc("POST /cgi-bin/epos/service.cgi", func(w http.ResponseWriter, r *http.Request) {
 		logger.Infof("Print request received (auto printer selection)")
-		printData(mgr, w, r, "")
+		printData(mgr, w, r, "", policy)
 	})
 	mux.HandleFunc("POST /p/{printerId}/pstprnt", func(w http.ResponseWriter, r *http.Request) {
 		printerID := r.PathValue("printerId")
@@ -453,7 +454,20 @@ func runPrintJob(ctx context.Context, mgr *printer.Manager, printerID string, da
 	return err, false
 }
 
-func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string) {
+// resolveImageMode keeps GS v 0 for USB and the auto-select route. Network
+// printer image settings are resolved per request, so changing the UI takes
+// effect promptly without recreating the endpoint.
+func resolveImageMode(printerID string, policy AccessPolicy) escpos.ImageMode {
+	if policy.LANImageMode == nil {
+		return escpos.ImageModeLegacy
+	}
+	if ip, ok := printer.DecodeLANPrinterID(printerID); ok {
+		return escpos.ImageMode(policy.LANImageMode(ip))
+	}
+	return escpos.ImageModeLegacy
+}
+
+func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string, policy AccessPolicy) {
 	tr := newTicketTrace(w, r, printerID, trace.KindReceipt)
 
 	bodyStarted := time.Now()
@@ -472,9 +486,11 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 	}
 
 	logger.Debugf("Processing print job for printer: %s request_id=%s", printerID, tr.ID())
+	mode := resolveImageMode(printerID, policy)
 	parseStarted := time.Now()
-	jobData, err := escpos.ParseXML(body)
-	tr.SetParse(time.Since(parseStarted))
+	jobData, err := escpos.ParseXMLWithMode(body, mode)
+	parseElapsed := time.Since(parseStarted)
+	tr.SetParse(parseElapsed)
 	tr.SetImageMode(trace.DetectImageMode(jobData))
 	if err != nil {
 		logger.Errorf("XML parsing error: %v request_id=%s", err, tr.ID())
@@ -483,11 +499,14 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 		return
 	}
 
+	sendStarted := time.Now()
 	err, dropped := runPrintJob(r.Context(), mgr, printerID, jobData, tr)
 	if dropped || errors.Is(err, printer.ErrCanceled) {
 		finishTrace(tr, clientCanceledCode, err)
 		return
 	}
+	logger.Infof("Print timing printer=%s imageMode=%s xmlBytes=%d escposBytes=%d parse=%s queueAndSend=%s",
+		printerID, mode, len(body), len(jobData), parseElapsed, time.Since(sendStarted))
 	if err != nil {
 		retCode := "EX_BADPORT"
 		if errors.Is(err, printer.ErrQueueFull) {

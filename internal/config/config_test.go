@@ -253,7 +253,6 @@ func TestFindAvailablePort_RangeExhausted(t *testing.T) {
 	testutil.ExpectedEqual(t, port, 0)
 }
 
-
 func TestManager_ResolveHTTPSPort(t *testing.T) {
 	tempDir := t.TempDir()
 	cm := &Manager{
@@ -296,4 +295,40 @@ func TestManager_ResolveHTTPSPort_PersistedConflictFails(t *testing.T) {
 	testutil.ExpectedError(t, err)
 	testutil.ExpectedEqual(t, resolved, 0)
 	testutil.ExpectedEqual(t, cm.GetHTTPSPort(), port)
+}
+
+func TestManager_LANPrinterImageModesPersistAndFallback(t *testing.T) {
+	cm := &Manager{path: filepath.Join(t.TempDir(), "config.json"), Data: defaults()}
+
+	testutil.ExpectedNoError(t, cm.AddLanEposPrinter("192.168.1.100"))
+	testutil.ExpectedNoError(t, cm.AddLanEposPrinter("192.168.1.101"))
+
+	// New and existing printer IPs retain the safe legacy raster default.
+	testutil.ExpectedEqual(t, cm.GetLANPrinterImageMode("192.168.1.100"), "legacy")
+	testutil.ExpectedEqual(t, cm.GetLANPrinterImageMode("192.168.1.101"), "legacy")
+
+	testutil.ExpectedNoError(t, cm.SetLANPrinterImageMode("192.168.1.100", "epson_graphics"))
+	testutil.ExpectedEqual(t, cm.GetLANPrinterImageMode("192.168.1.100"), "epson_graphics")
+	testutil.ExpectedEqual(t, cm.GetLANPrinterImageMode("192.168.1.101"), "legacy")
+
+	reloaded := &Manager{path: cm.Path(), Data: defaults()}
+	testutil.ExpectedNoError(t, reloaded.Load())
+	testutil.ExpectedEqual(t, reloaded.GetLANPrinterImageMode("192.168.1.100"), "epson_graphics")
+
+	if err := reloaded.SetLANPrinterImageMode("192.168.1.100", "invalid"); err == nil {
+		t.Fatal("unsupported graphics mode must be rejected")
+	}
+	if err := reloaded.SetLANPrinterImageMode("192.168.1.99", "epson_graphics"); err == nil {
+		t.Fatal("unconfigured LAN printer must be rejected")
+	}
+
+	testutil.ExpectedNoError(t, reloaded.SetLANPrinterImageMode("192.168.1.100", "legacy"))
+	testutil.ExpectedEqual(t, reloaded.GetLANPrinterImageMode("192.168.1.100"), "legacy")
+	testutil.ExpectedNoError(t, reloaded.SetLANPrinterImageMode("192.168.1.100", "epson_graphics"))
+	testutil.ExpectedNoError(t, reloaded.RemoveLANPrinter("192.168.1.100"))
+	again := &Manager{path: cm.Path(), Data: defaults()}
+	testutil.ExpectedNoError(t, again.Load())
+	if _, exists := again.Data.LANImageModes["192.168.1.100"]; exists {
+		t.Fatal("removed printer must not retain old graphics configuration")
+	}
 }
