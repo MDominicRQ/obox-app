@@ -818,3 +818,113 @@ func TestTraceTransport_CUPSModeIsReported(t *testing.T) {
 	testutil.ExpectedEqual(t, traceTransport("USB-not-LAN", escpos.ImageMode("cups_driver")), trace.TransportCUPS)
 	testutil.ExpectedEqual(t, traceTransport("USB-not-LAN", escpos.ImageModeLegacy), trace.TransportUSB)
 }
+
+// C7: a client that cancelled before submission must not invoke lp, even when
+// queue validation is cached (the server seam bypasses any macOS requirement).
+func TestPrintData_CUPSModeCancelledBeforeSubmitDoesNotCallLP(t *testing.T) {
+	previous := submitCUPS
+	t.Cleanup(func() { submitCUPS = previous })
+	calls := 0
+	submitCUPS = func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
+		calls++
+		return 1, nil
+	}
+
+	port := testutil.GetFreePort(t)
+	s := New(port, printer.NewManager(), AccessPolicy{
+		LANImageMode: func(string) string { return "cups_driver" },
+		LANCUPSQueue: func(string) string { return "TMTIENDA" },
+	})
+	defer s.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id),
+		bytes.NewBufferString(`<epos-print><image width="8" height="1">AA==</image><cut /></epos-print>`)).WithContext(ctx)
+	if _, err := testResponse(s, req); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("a cancelled request must not reach lp, got %d submissions", calls)
+	}
+}
+
+// C10 (server side): a CUPS receipt is submitted exactly once through the
+// server path and the success response is returned without a second transport.
+func TestPrintData_CUPSModeSubmitsOnce(t *testing.T) {
+	previous := submitCUPS
+	t.Cleanup(func() { submitCUPS = previous })
+	calls := 0
+	submitCUPS = func(_ context.Context, ip, queue string, img *escpos.CUPSImage) (int, error) {
+		calls++
+		if ip != "127.0.0.1" || queue != "TMTIENDA" || img == nil || img.Width != 8 {
+			t.Fatalf("unexpected CUPS submission ip=%q queue=%q img=%+v", ip, queue, img)
+		}
+		return 42, nil
+	}
+
+	port := testutil.GetFreePort(t)
+	s := New(port, printer.NewManager(), AccessPolicy{
+		LANImageMode: func(string) string { return "cups_driver" },
+		LANCUPSQueue: func(string) string { return "TMTIENDA" },
+	})
+	defer s.Stop()
+
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id),
+		bytes.NewBufferString(`<epos-print><image width="8" height="1">AA==</image><cut /></epos-print>`))
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `success="true"`)
+	if calls != 1 {
+		t.Fatalf("expected exactly one CUPS submission, got %d", calls)
+	}
+}
+
+// A CUPS failure is returned to Odoo with one attempt and no ESC/POS fallback.
+func TestPrintData_CUPSModeFailureHasNoFallback(t *testing.T) {
+	previous := submitCUPS
+	t.Cleanup(func() { submitCUPS = previous })
+	var connections atomic.Int32
+	if _, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
+		connections.Add(1)
+		_ = conn.Close()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	submitCUPS = func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
+		calls++
+		return 0, errors.New("lp rejected the job")
+	}
+
+	port := testutil.GetFreePort(t)
+	s := New(port, printer.NewManager(), AccessPolicy{
+		LANImageMode: func(string) string { return "cups_driver" },
+		LANCUPSQueue: func(string) string { return "TMTIENDA" },
+	})
+	defer s.Stop()
+
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id),
+		bytes.NewBufferString(`<epos-print><image width="8" height="1">AA==</image><cut /></epos-print>`))
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `success="false"`)
+	testutil.ExpectedContains(t, string(body), `EX_BADPORT`)
+	if calls != 1 {
+		t.Fatalf("a failed CUPS job must not be retried or fall back, got %d submissions", calls)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if connections.Load() != 0 {
+		t.Fatalf("CUPS failure fell back to direct ESC/POS: %d connection(s)", connections.Load())
+	}
+}

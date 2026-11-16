@@ -476,6 +476,11 @@ func resolveImageMode(printerID string, policy AccessPolicy) escpos.ImageMode {
 	return escpos.ImageModeLegacy
 }
 
+// submitCUPS is a narrow test seam for the server-to-CUPS path. Production
+// always calls cups.Submit; tests replace it to verify cancellation and
+// no-retry behavior on Linux without a macOS queue.
+var submitCUPS = cups.Submit
+
 func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, printerID string, policy AccessPolicy) {
 	mode := resolveImageMode(printerID, policy)
 	tr := newTicketTrace(w, r, printerID, trace.KindReceipt, traceTransport(printerID, mode))
@@ -526,8 +531,15 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 			parseElapsed := time.Since(parseStarted)
 			tr.SetParse(parseElapsed)
 			tr.SetTransport(trace.TransportCUPS)
+			if ctxErr := r.Context().Err(); ctxErr != nil {
+				// A client that cancelled before submission must not reach lp at
+				// all, even when queue validation is cached. Nothing was sent.
+				noteClientCanceled(tr, trace.CancelStageBeforeEnqueue, printerID, ctxErr)
+				finishTrace(tr, clientCanceledCode, ctxErr)
+				return
+			}
 			printStarted := time.Now()
-			pngSize, err := cups.Submit(r.Context(), ip, queue, img)
+			pngSize, err := submitCUPS(r.Context(), ip, queue, img)
 			tr.SetCUPS(time.Since(printStarted), 0)
 			logger.Infof("Print timing printer=%s imageMode=cups_driver queue=%s xmlBytes=%d pngBytes=%d width=%d height=%d parse=%s cupsSubmit=%s request_id=%s",
 				printerID, queue, len(body), pngSize, img.Width, img.Height, parseElapsed, time.Since(printStarted), tr.ID())

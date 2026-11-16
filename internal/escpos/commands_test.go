@@ -567,34 +567,79 @@ func TestBuildImage_EpsonGraphicsDotFieldBoundary(t *testing.T) {
 		ImageAttrs{Width: tooWide, Height: 1}, ImageModeLegacy); err != nil {
 		t.Fatalf("legacy must keep accepting a byte-sized 16-bit width: %v", err)
 	}
+
+	// 65520 is a near-maximum row that still fits the 16-bit dot field.
+	const nearWidth = 65520
+	rawNear := make([]byte, nearWidth/8)
+	gotNear, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(rawNear),
+		ImageAttrs{Width: nearWidth, Height: 1}, ImageModeEpsonGraphics)
+	testutil.ExpectedNoError(t, err)
+	nearBlocks := parseEpsonGraphicsBlocks(t, gotNear)
+	if len(nearBlocks) != 1 || nearBlocks[0].width != nearWidth {
+		t.Fatalf("unexpected near-maximum header: %+v", nearBlocks)
+	}
+	testutil.ExpectedBytesEqual(t, nearBlocks[0].payload, rawNear)
+
+	// 65535 pads to 65536 dots, so it must be rejected like 65529.
+	const paddedOverflow = 65535
+	rawOverflow := make([]byte, (paddedOverflow+7)/8)
+	if _, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(rawOverflow),
+		ImageAttrs{Width: paddedOverflow, Height: 1}, ImageModeEpsonGraphics); err == nil {
+		t.Fatal("65535-dot GS ( L width must be rejected after padding")
+	}
+
+	// Legacy keeps the byte-sized x field for every wide row.
+	for _, width := range []int{65529, 65535, 65536} {
+		row := make([]byte, (width+7)/8)
+		out, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(row),
+			ImageAttrs{Width: width, Height: 1}, ImageModeLegacy)
+		if err != nil {
+			t.Fatalf("legacy must accept width %d: %v", width, err)
+		}
+		bytesPerRow := (width + 7) / 8
+		if len(out) != 8+bytesPerRow {
+			t.Fatalf("legacy width %d: len=%d want %d", width, len(out), 8+bytesPerRow)
+		}
+		if got := int(out[4]) | int(out[5])<<8; got != bytesPerRow {
+			t.Fatalf("legacy width %d: xL/xH=%d want %d", width, got, bytesPerRow)
+		}
+	}
 }
 
-// Non-byte-aligned widths and heights crossing the 192-row GS ( L block size
-// must declare the padded width and reconstruct every source row exactly.
+// Non-byte-aligned widths, aligned widths and payload-limited heights must
+// declare the padded width and reconstruct every source row exactly.
 func TestBuildImage_EpsonGraphicsMultipleSlicesReconstructExactly(t *testing.T) {
-	for _, width := range []int{12, 100} {
-		const height = 385 // 192 + 192 + 1
-		stride := (width + 7) / 8
-		raw := make([]byte, stride*height)
+	cases := []struct {
+		width, height int
+		wantHeights   []int
+	}{
+		{12, 385, []int{192, 192, 1}},
+		{13, 1, []int{1}},
+		{100, 385, []int{192, 192, 1}},
+		{576, 385, []int{192, 192, 1}},
+		{65528, 15, []int{7, 7, 1}}, // payload size limits rows to 7 per block
+	}
+	for _, tc := range cases {
+		stride := (tc.width + 7) / 8
+		raw := make([]byte, stride*tc.height)
 		for i := range raw {
 			raw[i] = byte((i*53 + 17) % 256)
 		}
 		got, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(raw),
-			ImageAttrs{Width: width, Height: height}, ImageModeEpsonGraphics)
+			ImageAttrs{Width: tc.width, Height: tc.height}, ImageModeEpsonGraphics)
 		testutil.ExpectedNoError(t, err)
 
 		blocks := parseEpsonGraphicsBlocks(t, got)
-		wantHeights := []int{192, 192, 1}
-		if len(blocks) != len(wantHeights) {
-			t.Fatalf("width %d: expected %d blocks, got %d", width, len(wantHeights), len(blocks))
+		if len(blocks) != len(tc.wantHeights) {
+			t.Fatalf("%dx%d: expected %d blocks, got %d", tc.width, tc.height, len(tc.wantHeights), len(blocks))
 		}
 		var rebuilt []byte
 		for i, block := range blocks {
 			if block.width != stride*8 {
-				t.Fatalf("width %d: block %d padded width = %d, want %d", width, i, block.width, stride*8)
+				t.Fatalf("%dx%d: block %d padded width = %d, want %d", tc.width, tc.height, i, block.width, stride*8)
 			}
-			if block.height != wantHeights[i] {
-				t.Fatalf("width %d: block %d height = %d, want %d", width, i, block.height, wantHeights[i])
+			if block.height != tc.wantHeights[i] {
+				t.Fatalf("%dx%d: block %d height = %d, want %d", tc.width, tc.height, i, block.height, tc.wantHeights[i])
 			}
 			rebuilt = append(rebuilt, block.payload...)
 		}
