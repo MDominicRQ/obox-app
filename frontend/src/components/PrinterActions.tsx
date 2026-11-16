@@ -310,6 +310,7 @@ export default function PrinterActions({ printer }: PrinterActionsProps) {
         <p className="mt-1 text-xs text-gray-500">
           Compatible is the safe default. CUPS uses the local Epson driver for standard
           Odoo image receipts; drawer pulses and other commands remain direct ESC/POS.
+          Selecting Compatible rolls back immediately and clears the stored queue.
           Test one complete receipt before enabling more printers.
         </p>
       </div>

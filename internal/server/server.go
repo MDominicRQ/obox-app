@@ -14,18 +14,18 @@ import (
 	"sync/atomic"
 	"time"
 
-	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/cups"
+	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/logger"
 	"epos-proxy/internal/printer"
 )
 
 const (
-	maxRequestBodyBytes = int64(4 * 1024 * 1024)
-	serverReadTimeout    = 15 * time.Second
-	serverWriteTimeout   = 30 * time.Second
-	serverIdleTimeout    = 60 * time.Second
-	serverHeaderTimeout  = 5 * time.Second
+	maxRequestBodyBytes   = int64(4 * 1024 * 1024)
+	serverReadTimeout     = 15 * time.Second
+	serverWriteTimeout    = 30 * time.Second
+	serverIdleTimeout     = 60 * time.Second
+	serverHeaderTimeout   = 5 * time.Second
 	serverShutdownTimeout = 5 * time.Second
 )
 
@@ -382,7 +382,11 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 			ip, ok := printer.DecodeLANPrinterID(printerID)
 			if !ok || policy.LANCUPSQueue == nil || policy.LANCUPSQueue(ip) == "" {
 				logger.Errorf("CUPS queue not configured for printer %s", printerID)
-				writeEPOSResponse(w, EPOSResponse{Success: false, Code: "EX_BADPORT"})
+				writeEPOSResponse(w, EPOSResponse{
+					Success: false,
+					Code:    "EX_BADPORT",
+					Status:  "Epson CUPS mode is enabled without a verified queue",
+				})
 				return
 			}
 			queue := policy.LANCUPSQueue(ip)
@@ -391,16 +395,29 @@ func printData(mgr *printer.Manager, w http.ResponseWriter, r *http.Request, pri
 			pngSize, err := cups.Submit(r.Context(), ip, queue, img)
 			logger.Infof("Print timing printer=%s imageMode=cups_driver queue=%s xmlBytes=%d pngBytes=%d width=%d height=%d parse=%s cupsSubmit=%s",
 				printerID, queue, len(body), pngSize, img.Width, img.Height, parseElapsed, time.Since(printStarted))
+			if r.Context().Err() != nil && err == nil {
+				// A submission already handed to CUPS always finishes; Odoo may
+				// have aborted, so record it for duplicate triage.
+				logger.Warnf("Odoo canceled the request after printer=%s was submitted to CUPS queue=%s; no automatic resend", printerID, queue)
+			}
 			if err != nil {
 				// Never resend via ESC/POS: CUPS could already have queued the
 				// job, and an automatic fallback can duplicate sale receipts.
 				logger.Errorf("CUPS submission failed for printer %s: %v", printerID, err)
-				writeEPOSResponse(w, EPOSResponse{Success: false, Code: "EX_BADPORT"})
+				writeEPOSResponse(w, EPOSResponse{
+					Success: false,
+					Code:    "EX_BADPORT",
+					Status:  "Epson CUPS submission failed; check the Mac queue before retrying",
+				})
 				return
 			}
 			writeEPOSResponse(w, EPOSResponse{Success: true})
 			return
 		}
+		// A mixed job (for example image plus <pulse/>) cannot be reproduced
+		// by one CUPS page, so it stays on direct ESC/POS. Log it explicitly:
+		// silently switching transport per ticket would be hard to diagnose.
+		logger.Infof("CUPS mode skipped for printer=%s: job is not a single-image receipt; using direct ESC/POS", printerID)
 		mode = escpos.ImageModeLegacy
 	}
 

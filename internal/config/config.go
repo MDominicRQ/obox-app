@@ -23,8 +23,8 @@ const (
 )
 
 type AppConfig struct {
-	Port            int      `json:"port"`
-	HTTPSPort       int      `json:"https_port,omitempty"`
+	Port            int               `json:"port"`
+	HTTPSPort       int               `json:"https_port,omitempty"`
 	LANPrinters     []string          `json:"lan_printers,omitempty"`
 	LANImageModes   map[string]string `json:"lan_image_modes,omitempty"`
 	LANCUPSQueues   map[string]string `json:"lan_cups_queues,omitempty"`
@@ -284,11 +284,18 @@ func (cm *Manager) HasLANPrinter(ip string) bool {
 
 // GetLANPrinterImageMode returns a safe compatible default for existing and
 // unidentified printers. Epson graphics must be explicitly enabled per IP.
+// CUPS is only reported while a queue is still stored for that IP, so a
+// removed or half-written configuration can never route a receipt.
 func (cm *Manager) GetLANPrinterImageMode(ip string) string {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
-	if mode := cm.Data.LANImageModes[ip]; mode == "epson_graphics" || mode == "cups_driver" {
-		return mode
+	switch cm.Data.LANImageModes[ip] {
+	case "epson_graphics":
+		return "epson_graphics"
+	case "cups_driver":
+		if cm.Data.LANCUPSQueues[ip] != "" {
+			return "cups_driver"
+		}
 	}
 	return "legacy"
 }
@@ -316,6 +323,9 @@ func (cm *Manager) SetLANPrinterImageMode(ip, mode string) error {
 	if cm.Data.LANImageModes == nil {
 		cm.Data.LANImageModes = make(map[string]string)
 	}
+	// Switching away from the system driver removes the stored queue as well:
+	// rollback must not leave an authorized CUPS destination behind.
+	delete(cm.Data.LANCUPSQueues, ip)
 	if mode == "epson_graphics" {
 		cm.Data.LANImageModes[ip] = mode
 	} else {

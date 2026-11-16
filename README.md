@@ -86,32 +86,46 @@ existing driver **without changing the Odoo URL or LAN printer IP**.
    install a driver or create a printer queue.
 2. For the configured LAN receipt printer, choose **Epson system driver
    (macOS CUPS)**. The app lists only queues whose socket IP matches that
-   printer, preventing accidental routing to another store. The choice is
-   stored for this printer IP; the safe default remains **Compatible**.
+   printer, preventing accidental routing to another store. Before saving, it
+   reads the queue's real PPD options and **refuses** a queue that does not
+   expose 180 dpi output, `DocFeedCut`/`DocFeedNoCut` and 80 mm roll media
+   (or a custom size). The choice is stored for this printer IP; the safe
+   default remains **Compatible**.
 3. Print a full Odoo test receipt and verify physical speed, correct paper
    length (particularly receipts longer than 297 mm), QR/barcode fidelity,
    cut and cash-drawer behavior. Return to **Compatible** immediately if
-   anything differs.
+   anything differs: rollback drops the stored queue as well, so nothing is
+   left authorized.
 
 Implementation: For a standard Odoo `<epos-print><image>...<cut/></epos-print>`
 job the original 1-bit bitmap is reproduced in a 1-bit PNG. The PNG is
-submitted to the selected local Epson queue using `lp`, *without* `-o raw`,
-with `TmtSpeed=Auto`, `TmtPaperReduction=Both`, `TmtPaperSource=DocFeedCut`
-and disabled driver drawer pulses. Bitmap-only images without cut use
-`DocFeedNoCut`. Odoo sends a cash-drawer `<pulse/>` separately; this
-remains a direct ESC/POS operation. Other XML jobs that cannot safely be
-rendered as one raster receipt stay on the direct ESC/POS path.
+submitted to the selected local Epson queue using `lp`, *without* `-o raw`.
+Only options the queue actually exposes are applied (`TmtSpeed=Auto`,
+`TmtPaperReduction=Both`, `TmtPaperSource=DocFeedCut`, disabled driver drawer
+pulses); bitmap-only images without cut use `DocFeedNoCut`. Odoo sends a
+cash-drawer `<pulse/>` separately; this remains a direct ESC/POS operation.
+Other XML jobs that cannot safely be rendered as one raster receipt stay on
+the direct ESC/POS path and are logged explicitly.
+
+The 180 dpi profile was verified against one Epson TM-T88IV queue only. It is
+not a universal Epson driver profile: a queue with other resolutions, media or
+driver options is refused rather than printed with these values. Operational
+requirements, the physical test protocol and rollback steps are in
+`docs/cups-mode.md`.
 
 For images taller than approximately 287 mm, the integration requests a
-custom 80 mm roll-paper length. Epson drivers vary in their supported
-custom page sizes; some may reject or rescale such jobs. **Do not roll out
+custom 80 mm roll-paper length. A queue without custom media support is
+refused for those tickets instead of cropping them. **Do not roll out
 to every store before validating real long receipts.**
 
 `lp` acknowledging a job means **CUPS accepted it**, not that a physical
-receipt was completed. A CUPS failure is returned to Odoo without an
-automatic ESC/POS retry, to avoid duplicate customer receipts. Temporary
-ticket PNGs have OS-private permissions and are deleted after submission.
-The system driver mode is macOS-only; other platforms remain unchanged.
+receipt was completed. A submission already handed to CUPS is always allowed
+to finish, even if Odoo aborts the HTTP request, so a canceled client does not
+leave a half-sent job behind. A CUPS failure is returned to Odoo without an
+automatic ESC/POS retry, to avoid duplicate customer receipts. The whole CUPS
+path is bounded below Odoo's 15 s client timeout. Temporary ticket PNGs have
+OS-private permissions and are deleted after submission. The system driver
+mode is macOS-only; other platforms remain unchanged.
 
 Official CUPS media selection:
 https://www.cups.org/doc/options.html

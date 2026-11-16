@@ -253,7 +253,6 @@ func TestFindAvailablePort_RangeExhausted(t *testing.T) {
 	testutil.ExpectedEqual(t, port, 0)
 }
 
-
 func TestManager_ResolveHTTPSPort(t *testing.T) {
 	tempDir := t.TempDir()
 	cm := &Manager{
@@ -358,4 +357,20 @@ func TestManager_CUPSQueuePerPrinterAndCleanup(t *testing.T) {
 	testutil.ExpectedEqual(t, reloaded.GetLANPrinterImageMode("192.168.12.33"), "legacy")
 	testutil.ExpectedNoError(t, reloaded.RemoveLANPrinter("192.168.12.33"))
 	testutil.ExpectedEqual(t, reloaded.GetLANPrinterCUPSQueue("192.168.12.33"), "")
+}
+
+func TestManager_SwitchingModeClearsAuthorizedCUPSQueue(t *testing.T) {
+	cm := &Manager{path: filepath.Join(t.TempDir(), "config.json"), Data: defaults()}
+	testutil.ExpectedNoError(t, cm.AddLanEposPrinter("192.168.12.33"))
+	testutil.ExpectedNoError(t, cm.SetLANPrinterCUPSQueue("192.168.12.33", "TMTIENDA"))
+	testutil.ExpectedEqual(t, cm.GetLANPrinterImageMode("192.168.12.33"), "cups_driver")
+
+	// Rollback to the safe mode must also drop the authorized queue.
+	testutil.ExpectedNoError(t, cm.SetLANPrinterImageMode("192.168.12.33", "legacy"))
+	testutil.ExpectedEqual(t, cm.GetLANPrinterCUPSQueue("192.168.12.33"), "")
+	testutil.ExpectedEqual(t, cm.GetLANPrinterImageMode("192.168.12.33"), "legacy")
+
+	// A stale cups_driver entry without a queue must fall back to legacy.
+	cm.Data.LANImageModes["192.168.12.99"] = "cups_driver"
+	testutil.ExpectedEqual(t, cm.GetLANPrinterImageMode("192.168.12.99"), "legacy")
 }

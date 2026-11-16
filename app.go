@@ -134,8 +134,8 @@ func NewApp() *App {
 func (a *App) proxyAccessPolicy() server.AccessPolicy {
 	return server.AccessPolicy{
 		NetworkPrintingEnabled: a.config.IsNetworkPrintingEnabled,
-		LANImageMode: a.config.GetLANPrinterImageMode,
-		LANCUPSQueue: a.config.GetLANPrinterCUPSQueue,
+		LANImageMode:           a.config.GetLANPrinterImageMode,
+		LANCUPSQueue:           a.config.GetLANPrinterCUPSQueue,
 	}
 }
 
@@ -416,6 +416,7 @@ func (a *App) SetLANPrinterCUPSQueue(ip, queue string) error {
 	if err := cups.ValidateQueue(context.Background(), validatedIP, queue); err != nil {
 		return err
 	}
+	cups.ForgetQueue(queue)
 	return a.config.SetLANPrinterCUPSQueue(validatedIP, queue)
 }
 
