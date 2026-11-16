@@ -2,6 +2,13 @@
 
 A lightweight desktop app that exposes your USB Epson printer as a local HTTP endpoint, making it compatible with Odoo Point of Sale.
 
+## Documentation
+
+- [Printing modes, benchmark and rollout (candidate reference, in review)](docs/printing-modes.md) — draft under technical review, not yet adopted: decision tree, `legacy` / `GS ( L` / CUPS selection, Firefox and local CA, rollback and known limitations.
+- [macOS + Odoo 19 local printing](docs/macos11-odoo-https.md) — addresses, HTTP/HTTPS, Local Network Access and certificates.
+
+No physical benchmark has been published yet. Performance claims stay pending until the protocol in `docs/printing-benchmark.md` is run on real hardware.
+
 ## Installation
 
 ### Download
@@ -24,6 +31,8 @@ Download the latest release for your platform from the [Releases](../../releases
 -  Check Use Local Network access option
 -  Save and open your POS session
 
+Local Network Access only exists in Chromium. In Firefox or Safari, disable **Use Local Network Access** (the `point_of_sale.use_lna` system parameter in Odoo 19.0) so Odoo uses the scheme of the Odoo page: copy the HTTP address for an `http://` Odoo and the HTTPS address for an `https://` Odoo. See [macOS + Odoo 19 local printing](docs/macos11-odoo-https.md) for the full matrix and the Firefox certificate steps.
+
 
 ### Linux
 
@@ -33,3 +42,107 @@ sudo apt update
 sudo apt install libwebkit2gtk-4.1-0
 ```
 
+## Diagnostics
+
+Every print ticket writes one `print_trace` line with per-stage timings,
+byte counts and a `request_id` correlation. See
+[docs/printing-benchmark.md](docs/printing-benchmark.md) for the field reference
+and the reproducible benchmark protocol, and
+[docs/odoo-print-retry.md](docs/odoo-print-retry.md) for what happens when Odoo
+abandons a print request and how to spot a possible duplicate in the logs.
+
+
+## Epson TM-T88 family — LAN receipt graphics
+
+Odoo 19's Epson printer integration rasterizes a **complete HTML receipt** into
+one monochrome `<image>` command. This proxy can transmit those image pixels using
+Epson buffered graphics (**GS ( L**, function 112 to store, function 50 to print),
+instead of the older **GS v 0** raster command.
+
+- **LAN receipt printers:** **Compatible / legacy (GS v 0)** remains the default.
+  The **GS ( L — experimental** option is opt-in per printer IP
+  in the app's **LAN receipt image mode** dropdown. It is stored per printer IP
+  and takes effect on the next ticket without changing the Odoo URL.
+  For unknown models, retain Compatible mode until explicitly validated.
+- **USB printers and raw label printing:** unchanged.
+- The experimental GS ( L mode divides the image into 192-row graphics chunks (or fewer
+  rows when necessary for the 16-bit command length). It does not drop image
+  rows, modify pixels, disable cutting, or change paper density.
+- The application logs `Print timing ... imageMode=... xmlBytes=...
+  escposBytes=... parse=... queueAndSend=...` for each Odoo ticket. These are
+  **software processing and TCP acceptance times**, *not* measured paper
+  output times. If the network send is fast but paper movement remains slow,
+  compare the same full receipt on GS ( L and the legacy mode; the printer's
+  firmware, thermal head power, DIP settings, print density, and image content
+  can still determine physical speed.
+- Epson TM-T88IV/M129H is documented as supporting GS ( L function 112 and
+  the paired function 50. Other Epson TM-T88 models support this command
+  family, but exact performance must be confirmed on each hardware generation.
+
+Epson command reference:
+[GS ( L function 112](https://download4.epson.biz/sec_pubs/pos/reference_en/escpos/gs_lparen_cl_fn112.html),
+[GS ( L function 50](https://download4.epson.biz/sec_pubs/pos/reference_en/escpos/gs_lparen_cl_fn50.html).
+
+**Compatibility note:** The proxy cannot conclusively detect unsupported
+graphics commands over write-only TCP/9100. A successful TCP write confirms
+network acceptance, not that the printer understood or printed the graphics.
+For an unknown model use Compatible mode until GS ( L has been tested. Do not
+send an automatic duplicate raster fallback after a successful TCP write:
+it may print the same ticket twice.
+
+
+### Experimental macOS Epson CUPS mode for slow Odoo receipts
+
+When an Epson TM-T88IV prints the same receipt faster through the installed
+macOS driver than via direct ESC/POS TCP/9100, obox-app can now try that
+existing driver **without changing the Odoo URL or LAN printer IP**.
+
+1. The Epson CUPS printer queue must already be installed on the Mac and
+   configured with a `socket://PRINTER_IP:9100` device URI. Check with
+   `lpstat -v` and `lpoptions -p QUEUE -l`. This integration does **not**
+   install a driver or create a printer queue.
+2. For the configured LAN receipt printer, choose **Epson system driver
+   (macOS CUPS)**. The app lists only queues whose socket IP matches that
+   printer, preventing accidental routing to another store. Before saving, it
+   reads the queue's real PPD options and **refuses** a queue that does not
+   expose 180 dpi output, `DocFeedCut`/`DocFeedNoCut` and 80 mm roll media
+   (or a custom size). The choice is stored for this printer IP; the safe
+   default remains **Compatible**.
+3. Print a full Odoo test receipt and verify physical speed, correct paper
+   length (particularly receipts longer than 297 mm), QR/barcode fidelity,
+   cut and cash-drawer behavior. Return to **Compatible** immediately if
+   anything differs: rollback drops the stored queue as well, so nothing is
+   left authorized.
+
+Implementation: For a standard Odoo `<epos-print><image>...<cut/></epos-print>`
+job the original 1-bit bitmap is reproduced in a 1-bit PNG. The PNG is
+submitted to the selected local Epson queue using `lp`, *without* `-o raw`.
+Only options the queue actually exposes are applied (`TmtSpeed=Auto`,
+`TmtPaperReduction=Both`, `TmtPaperSource=DocFeedCut`, disabled driver drawer
+pulses); bitmap-only images without cut use `DocFeedNoCut`. Odoo sends a
+cash-drawer `<pulse/>` separately; this remains a direct ESC/POS operation.
+Other XML jobs that cannot safely be rendered as one raster receipt stay on
+the direct ESC/POS path and are logged explicitly.
+
+The 180 dpi profile was verified against one Epson TM-T88IV queue only. It is
+not a universal Epson driver profile: a queue with other resolutions, media or
+driver options is refused rather than printed with these values. Operational
+requirements, the physical test protocol and rollback steps are in
+`docs/cups-mode.md`.
+
+For images taller than approximately 287 mm, the integration requests a
+custom 80 mm roll-paper length. A queue without custom media support is
+refused for those tickets instead of cropping them. **Do not roll out
+to every store before validating real long receipts.**
+
+`lp` acknowledging a job means **CUPS accepted it**, not that a physical
+receipt was completed. A submission already handed to CUPS is always allowed
+to finish, even if Odoo aborts the HTTP request, so a canceled client does not
+leave a half-sent job behind. A CUPS failure is returned to Odoo without an
+automatic ESC/POS retry, to avoid duplicate customer receipts. The whole CUPS
+path is bounded below Odoo's 15 s client timeout. Temporary ticket PNGs have
+OS-private permissions and are deleted after submission. The system driver
+mode is macOS-only; other platforms remain unchanged.
+
+Official CUPS media selection:
+https://www.cups.org/doc/options.html

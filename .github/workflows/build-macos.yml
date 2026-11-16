@@ -37,7 +37,7 @@ jobs:
         include:
           # Apple Silicon: keep the proven modern build unchanged.
           - arch: arm64
-            runner: macos-15
+            runner: macos-26
             platform: darwin/arm64
             artifact: epos-proxy-macos-arm64
             go_version: "1.24.13"
@@ -452,7 +452,9 @@ jobs:
             exit 1
           fi
 
-          go test -v ./...
+          # -p 1: internal/printer and internal/server both bind the fixed LAN
+          # printer port 9100, so parallel package tests race on the socket.
+          go test -p 1 -v ./...
 
       # ============================================================
       # LOCATE APPLICATION

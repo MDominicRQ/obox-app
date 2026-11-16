@@ -12,6 +12,8 @@ import (
 
 	"epos-proxy/internal/certs"
 	"epos-proxy/internal/config"
+	"epos-proxy/internal/cups"
+	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/logger"
 	"epos-proxy/internal/printer"
 	"epos-proxy/internal/server"
@@ -80,6 +82,8 @@ type Printer struct {
 	Id             string `json:"id"`
 	IsLAN          bool   `json:"isLAN"`
 	LANIp          string `json:"lanIp,omitempty"`
+	LANImageMode   string `json:"lanImageMode,omitempty"`
+	LANCUPSQueue   string `json:"lanCupsQueue,omitempty"`
 	Online         bool   `json:"online"`
 	Type           string `json:"type"`
 }
@@ -130,6 +134,8 @@ func NewApp() *App {
 func (a *App) proxyAccessPolicy() server.AccessPolicy {
 	return server.AccessPolicy{
 		NetworkPrintingEnabled: a.config.IsNetworkPrintingEnabled,
+		LANImageMode:           a.config.GetLANPrinterImageMode,
+		LANCUPSQueue:           a.config.GetLANPrinterCUPSQueue,
 	}
 }
 
@@ -315,6 +321,8 @@ func (a *App) Printers() Printers {
 			NetworkHTTPSIp: a.GetPrinterNetworkHTTPSUrl(info.Id),
 			IsLAN:          true,
 			LANIp:          info.IP,
+			LANImageMode:   a.config.GetLANPrinterImageMode(info.IP),
+			LANCUPSQueue:   a.config.GetLANPrinterCUPSQueue(info.IP),
 			Type:           string(printer.TypeReceipt),
 		})
 	}
@@ -368,6 +376,48 @@ func (a *App) ConfirmRemoveLANPrinter(ip string) (bool, error) {
 	}
 	logger.Infof("Remove LAN printer cancelled, Remove printer dialog result: %s", result)
 	return false, nil
+}
+
+// SetLANPrinterImageMode switches a network receipt printer between modern
+// Epson buffered graphics and the broadly compatible legacy raster command.
+func (a *App) SetLANPrinterImageMode(ip, mode string) error {
+	validatedIP, err := printer.ValidateIPAddress(ip)
+	if err != nil {
+		return err
+	}
+	if mode != string(escpos.ImageModeLegacy) && mode != string(escpos.ImageModeEpsonGraphics) {
+		return fmt.Errorf("unsupported image mode %q", mode)
+	}
+	return a.config.SetLANPrinterImageMode(validatedIP, mode)
+}
+
+// ListLANPrinterCUPSQueues lists local macOS queues backed by socket://IP:9100.
+func (a *App) ListLANPrinterCUPSQueues(ip string) ([]string, error) {
+	validatedIP, err := printer.ValidateIPAddress(ip)
+	if err != nil {
+		return nil, err
+	}
+	if !a.config.HasLANPrinter(validatedIP) {
+		return nil, fmt.Errorf("LAN printer %s is not configured", validatedIP)
+	}
+	return cups.MatchingQueues(context.Background(), validatedIP)
+}
+
+// SetLANPrinterCUPSQueue verifies the actual destination before enabling
+// system-driver printing for one LAN printer.
+func (a *App) SetLANPrinterCUPSQueue(ip, queue string) error {
+	validatedIP, err := printer.ValidateIPAddress(ip)
+	if err != nil {
+		return err
+	}
+	if !a.config.HasLANPrinter(validatedIP) {
+		return fmt.Errorf("LAN printer %s is not configured", validatedIP)
+	}
+	if err := cups.ValidateQueue(context.Background(), validatedIP, queue); err != nil {
+		return err
+	}
+	cups.ForgetQueue(queue)
+	return a.config.SetLANPrinterCUPSQueue(validatedIP, queue)
 }
 
 func (a *App) CheckLANPrinterStatus(ip string) bool {
@@ -560,7 +610,7 @@ func (a *App) InstallHTTPSCertificate() error {
 
 	message := "The ePOS Proxy local CA certificate has been opened. Mark it as trusted in your operating system before using the HTTPS address from Odoo."
 	if runtime.GOOS == "darwin" {
-		message = "The ePOS Proxy local CA certificate has been opened in Keychain Access. Import it, open 'ePOS Proxy Local CA', expand Trust, and set 'When using this certificate' to 'Always Trust'. macOS may request an administrator password. ePOS Proxy does not run privileged trust commands silently."
+		message = "The ePOS Proxy local CA certificate has been opened in Keychain Access. Import it, open 'ePOS Proxy Local CA', expand Trust, and set 'When using this certificate' to 'Always Trust'. macOS may request an administrator password. ePOS Proxy does not run privileged trust commands silently.\n\nFirefox: since Firefox 120 the macOS Keychain roots are imported by default, so a CA set to 'Always Trust' can work after Firefox is restarted. If Firefox still reports a certificate error, import the same certificate manually under Settings > Privacy & Security > Certificates > View Certificates > Authorities > Import, check 'Trust this CA to identify websites', and restart Firefox. Safari uses the macOS Keychain directly."
 	}
 
 	_, err := a.dlg().Message(a.ctx, wailsruntime.MessageDialogOptions{

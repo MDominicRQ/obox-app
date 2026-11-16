@@ -2,20 +2,28 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"epos-proxy/internal/certs"
+	"epos-proxy/internal/cups"
+	"epos-proxy/internal/escpos"
 	"epos-proxy/internal/printer"
 	"epos-proxy/internal/testutil"
+	"epos-proxy/internal/trace"
 )
 
 func testResponse(s *Server, req *http.Request) (*http.Response, error) {
@@ -227,7 +235,6 @@ func TestPrintData_AutoSelectRoute(t *testing.T) {
 		})
 	}
 }
-
 
 func TestPrinterBaseRouteIsBrowserTestable(t *testing.T) {
 	port := testutil.GetFreePort(t)
@@ -466,4 +473,641 @@ func TestPrintData_InvalidImageDimensions_ReturnsSchemaError(t *testing.T) {
 	testutil.ExpectedNoError(t, err)
 	testutil.ExpectedContains(t, string(body), `success="false"`)
 	testutil.ExpectedContains(t, string(body), `code="SchemaError"`)
+}
+
+// completeTicket exercises every element the proxy can rasterise, so the byte
+// comparison below covers text, feed, image, cut and pulse.
+const completeTicket = `<epos-print>
+<text align="center" em="true">ORDER #42</text>
+<feed line="2" />
+<image width="8" height="2">qlU=</image>
+<cut />
+<pulse drawer="drawer_1" time="pulse_100" />
+</epos-print>`
+
+func startCapturePrinter(t *testing.T) <-chan []byte {
+	t.Helper()
+	received := make(chan []byte, 1)
+	_, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
+		defer conn.Close()
+		payload, _ := io.ReadAll(conn)
+		received <- payload
+	})
+	testutil.ExpectedNoError(t, err)
+	return received
+}
+
+func TestPrintData_DeviceBytesMatchEscposOutput(t *testing.T) {
+	received := startCapturePrinter(t)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	printerID := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", printerID), bytes.NewReader([]byte(completeTicket)))
+	req.Header.Set("Content-Type", "text/xml")
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `success="true"`)
+
+	expected, err := escpos.ParseXML([]byte(completeTicket))
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedTrue(t, bytes.Contains(expected, escpos.CmdCut), "expected ESC/POS output to contain the cut command")
+
+	select {
+	case captured := <-received:
+		testutil.ExpectedBytesEqual(t, captured, expected, "instrumentation must not alter the ESC/POS stream")
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the mock printer payload")
+	}
+
+	if id := resp.Header.Get(requestIDHeader); len(id) != 2*8 {
+		t.Errorf("expected a generated request id on the response, got %q", id)
+	}
+}
+
+func TestPrintData_EchoesClientRequestID(t *testing.T) {
+	received := startCapturePrinter(t)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	printerID := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", printerID), bytes.NewReader([]byte(completeTicket)))
+	req.Header.Set("Content-Type", "text/xml")
+	req.Header.Set(requestIDHeader, "bench-short-01")
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedEqual(t, resp.Header.Get(requestIDHeader), "bench-short-01")
+
+	select {
+	case <-received:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the mock printer payload")
+	}
+}
+
+func TestPrintData_UnusableRequestIDIsReplaced(t *testing.T) {
+	received := startCapturePrinter(t)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	printerID := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", printerID), bytes.NewReader([]byte(completeTicket)))
+	req.Header.Set("Content-Type", "text/xml")
+	req.Header.Set(requestIDHeader, "   ")
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	if id := resp.Header.Get(requestIDHeader); id == "" || id == "   " {
+		t.Errorf("expected a generated request id, got %q", id)
+	}
+
+	select {
+	case <-received:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the mock printer payload")
+	}
+}
+
+func TestPrintTransport(t *testing.T) {
+	testutil.ExpectedEqual(t, printTransport(printer.EncodeLANPrinterID("192.168.1.50")), "lan")
+	testutil.ExpectedEqual(t, printTransport("czpOT05fRVhJU1RFTlRfU0VSSUFMCg"), "usb")
+	testutil.ExpectedEqual(t, printTransport(""), "usb")
+}
+
+func TestFinishTraceDoesNotBlockHandler(t *testing.T) {
+	tr := trace.New("req-async", "LAN:127.0.0.1", trace.TransportLAN, trace.KindReceipt)
+	tr.MarkQueued()
+
+	started := time.Now()
+	finishTrace(tr, "", nil, func(tr *trace.Trace) { tr.Log() })
+	elapsed := time.Since(started)
+
+	if elapsed >= 150*time.Millisecond {
+		t.Fatalf("finishTrace blocked the handler for %s; it must settle off the request path", elapsed)
+	}
+
+	tr.Finish()
+}
+
+// TestPrintData_CanceledBeforeEnqueueDoesNotPrint covers the first safety rule:
+// a request Odoo already abandoned must not reach the printer, because Odoo
+// will offer a retry and that retry would print a duplicate.
+func TestPrintData_CanceledBeforeEnqueueDoesNotPrint(t *testing.T) {
+	received := startCapturePrinter(t)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	printerID := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", printerID), bytes.NewReader([]byte(completeTicket))).
+		WithContext(ctx)
+	req.Header.Set("Content-Type", "text/xml")
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedLen(t, body, 0)
+
+	select {
+	case payload := <-received:
+		t.Fatalf("device received %d bytes for a canceled request: %q", len(payload), payload)
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+// TestPrintData_LabelCanceledBeforeEnqueueDoesNotPrint mirrors the receipt
+// rule on the label endpoint.
+func TestPrintData_LabelCanceledBeforeEnqueueDoesNotPrint(t *testing.T) {
+	received := startCapturePrinter(t)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	printerID := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/p/%s/pstprnt", printerID), bytes.NewReader([]byte("^XA^FDCANCELED^FS^XZ"))).
+		WithContext(ctx)
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedLen(t, body, 0)
+
+	select {
+	case payload := <-received:
+		t.Fatalf("device received %d bytes for a canceled label request: %q", len(payload), payload)
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+// TestPrintData_SendsEachTicketOnce pins the single-send contract: one POST
+// produces exactly one device write and no automatic retry.
+func TestPrintData_SendsEachTicketOnce(t *testing.T) {
+	payloads := make(chan []byte, 4)
+	var connections atomic.Int32
+	_, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
+		defer conn.Close()
+		connections.Add(1)
+		payload, _ := io.ReadAll(conn)
+		if len(payload) > 0 {
+			payloads <- payload
+		}
+	})
+	testutil.ExpectedNoError(t, err)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr)
+	defer s.Stop()
+
+	printerID := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", printerID), bytes.NewReader([]byte(completeTicket)))
+	req.Header.Set("Content-Type", "text/xml")
+
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `success="true"`)
+
+	expected, err := escpos.ParseXML([]byte(completeTicket))
+	testutil.ExpectedNoError(t, err)
+
+	select {
+	case captured := <-payloads:
+		testutil.ExpectedBytesEqual(t, captured, expected, "the device must receive the ticket exactly once")
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the ticket payload")
+	}
+
+	select {
+	case extra := <-payloads:
+		t.Fatalf("device received a second write of %d bytes; the proxy must not resend", len(extra))
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	testutil.ExpectedEqual(t, int(connections.Load()), 1)
+}
+
+// TestCancelStageFor pins the labelling rule: a job that ended in a device
+// error must never be reported as if the ticket had been written.
+func TestCancelStageFor(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"dropped before the device", fmt.Errorf("%w: context canceled", printer.ErrCanceled), trace.CancelStageQueued},
+		{"device write failed", errors.New("device write failed"), trace.CancelStageAfterWriteFail},
+		{"successful write", nil, trace.CancelStageAfterWrite},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cancelStageFor(tc.err)
+			testutil.ExpectedEqual(t, got, tc.want)
+			if tc.err != nil && got == trace.CancelStageAfterWrite {
+				t.Fatalf("a failed job must not be labelled %q", trace.CancelStageAfterWrite)
+			}
+		})
+	}
+}
+func TestResolveImageMode_OnlyConfiguredLANPrintersUseEpson(t *testing.T) {
+	lanPrinter := printer.EncodeLANPrinterID("192.168.1.55")
+	policy := AccessPolicy{
+		LANImageMode: func(ip string) string {
+			if ip == "192.168.1.55" {
+				return string(escpos.ImageModeEpsonGraphics)
+			}
+			return string(escpos.ImageModeLegacy)
+		},
+	}
+	testutil.ExpectedEqual(t, resolveImageMode(lanPrinter, policy), escpos.ImageModeEpsonGraphics)
+	testutil.ExpectedEqual(t, resolveImageMode(lanPrinter, AccessPolicy{}), escpos.ImageModeLegacy)
+	testutil.ExpectedEqual(t, resolveImageMode("", policy), escpos.ImageModeLegacy)
+	testutil.ExpectedEqual(t, resolveImageMode("USB-not-LAN", policy), escpos.ImageModeLegacy)
+}
+
+func TestPrintData_CUPSModeDrawerStillUsesDirectESCPOS(t *testing.T) {
+	_, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
+		defer conn.Close()
+		data := make([]byte, 256)
+		_, _ = conn.Read(data)
+	})
+	testutil.ExpectedNoError(t, err)
+
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr, AccessPolicy{
+		LANImageMode: func(string) string { return "cups_driver" },
+		LANCUPSQueue: func(string) string { return "TMTIENDA" },
+	})
+	defer s.Stop()
+
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	url := fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id)
+	req := httptest.NewRequest(http.MethodPost, url,
+		bytes.NewBufferString(`<epos-print><pulse /></epos-print>`))
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	data, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(data), `success="true"`)
+}
+
+func TestPrintData_CUPSModeWithoutQueueRefusesImage(t *testing.T) {
+	port := testutil.GetFreePort(t)
+	mgr := printer.NewManager()
+	s := New(port, mgr, AccessPolicy{
+		LANImageMode: func(string) string { return "cups_driver" },
+	})
+	defer s.Stop()
+
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	url := fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id)
+	req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString(
+		`<epos-print><image width="8" height="1">AA==</image><cut /></epos-print>`))
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	data, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(data), `success="false"`)
+	testutil.ExpectedContains(t, string(data), `code="EX_BADPORT"`)
+}
+
+// Q3: USB, auto-selection (empty printer id) and a zero-value policy never
+// inherit an experimental LAN image mode; only a configured LAN printer with
+// its own stored mode can leave legacy.
+func TestResolveImageMode_USBAndAutoSelectionStayLegacy(t *testing.T) {
+	experimental := AccessPolicy{LANImageMode: func(string) string { return "cups_driver" }}
+	testutil.ExpectedEqual(t, resolveImageMode("", experimental), escpos.ImageModeLegacy)
+	testutil.ExpectedEqual(t, resolveImageMode("USB-not-LAN", experimental), escpos.ImageModeLegacy)
+	testutil.ExpectedEqual(t, resolveImageMode("", AccessPolicy{}), escpos.ImageModeLegacy)
+	testutil.ExpectedEqual(t, resolveImageMode("USB-not-LAN", AccessPolicy{}), escpos.ImageModeLegacy)
+}
+
+// CUPS receipts must report transport=cups in the trace; mixed jobs that fall
+// back to direct ESC/POS keep their LAN/USB transport.
+func TestTraceTransport_CUPSModeIsReported(t *testing.T) {
+	lanID := printer.EncodeLANPrinterID("192.168.1.55")
+	testutil.ExpectedEqual(t, traceTransport(lanID, escpos.ImageMode("cups_driver")), trace.TransportCUPS)
+	testutil.ExpectedEqual(t, traceTransport(lanID, escpos.ImageModeLegacy), trace.TransportLAN)
+	testutil.ExpectedEqual(t, traceTransport(lanID, escpos.ImageModeEpsonGraphics), trace.TransportLAN)
+	testutil.ExpectedEqual(t, traceTransport("USB-not-LAN", escpos.ImageMode("cups_driver")), trace.TransportCUPS)
+	testutil.ExpectedEqual(t, traceTransport("USB-not-LAN", escpos.ImageModeLegacy), trace.TransportUSB)
+}
+
+// C7: a client that cancelled before submission must not invoke lp, even when
+// queue validation is cached (the server seam bypasses any macOS requirement).
+const cupsImageBody = `<epos-print><image width="8" height="1">AA==</image><cut /></epos-print>`
+
+func cupsPolicy() AccessPolicy {
+	return AccessPolicy{
+		LANImageMode: func(string) string { return "cups_driver" },
+		LANCUPSQueue: func(string) string { return "TMTIENDA" },
+	}
+}
+
+func testHandlerWithDeps(policy AccessPolicy, deps handlerDeps) *Server {
+	return &Server{app: newHTTPHandlerWithDeps(printer.NewManager(), policy, deps)}
+}
+
+func waitTrace(t *testing.T, traces <-chan *trace.Trace) *trace.Trace {
+	t.Helper()
+	select {
+	case tr := <-traces:
+		return tr
+	case <-time.After(2 * time.Second):
+		t.Fatal("trace was not emitted")
+		return nil
+	}
+}
+
+// Server -> CUPS positive path: exactly one submission, the ePOS response and
+// the emitted trace line (transport=cups, request_id, body_sha256, cups_lp_ms).
+func TestPrintData_CUPSModeEmitsCUPSTrace(t *testing.T) {
+	traces := make(chan *trace.Trace, 1)
+	calls := 0
+	deps := handlerDeps{
+		submitCUPS: func(ctx context.Context, ip, queue string, img *escpos.CUPSImage) (int, error) {
+			calls++
+			if ctx.Err() != nil {
+				t.Fatal("submitter received an already cancelled context")
+			}
+			if ip != "127.0.0.1" || queue != "TMTIENDA" {
+				t.Fatalf("unexpected destination ip=%q queue=%q", ip, queue)
+			}
+			if img == nil || img.Width != 8 || img.Height != 1 || !img.Cut {
+				t.Fatalf("unexpected image: %+v", img)
+			}
+			// Spin briefly so cups_lp_ms is a measured, non-zero duration.
+			until := time.Now().Add(200 * time.Microsecond)
+			for time.Now().Before(until) {
+			}
+			return 42, nil
+		},
+		emitTrace: func(tr *trace.Trace) { traces <- tr },
+	}
+	s := testHandlerWithDeps(cupsPolicy(), deps)
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(cupsImageBody))
+	req.Header.Set(requestIDHeader, "cups-req-1")
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `success="true"`)
+
+	if calls != 1 {
+		t.Fatalf("expected exactly one CUPS submission, got %d", calls)
+	}
+
+	line := waitTrace(t, traces).Line()
+	for _, want := range []string{
+		"transport=cups",
+		"request_id=cups-req-1",
+		"body_sha256=" + trace.Fingerprint([]byte(cupsImageBody)),
+	} {
+		testutil.ExpectedContains(t, line, want)
+	}
+	if strings.Contains(line, "cups_lp_ms=-") || !strings.Contains(line, "cups_lp_ms=") {
+		t.Fatalf("cups_lp_ms must be measured, got %q", line)
+	}
+}
+
+// H1/C7: a request cancelled before submission makes zero CUPS calls, emits a
+// before-enqueue cancellation trace, and does not return a success response.
+func TestPrintData_CUPSModeCancelledBeforeSubmitDoesNotCallLP(t *testing.T) {
+	traces := make(chan *trace.Trace, 1)
+	calls := 0
+	deps := handlerDeps{
+		submitCUPS: func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
+			calls++
+			return 1, nil
+		},
+		emitTrace: func(tr *trace.Trace) { traces <- tr },
+	}
+	s := testHandlerWithDeps(cupsPolicy(), deps)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(cupsImageBody)).WithContext(ctx)
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	if strings.Contains(string(body), `success="true"`) {
+		t.Fatalf("a cancelled request must not simulate acceptance: %s", body)
+	}
+	if calls != 0 {
+		t.Fatalf("a cancelled request must not reach lp, got %d submissions", calls)
+	}
+	line := waitTrace(t, traces).Line()
+	for _, want := range []string{
+		"client_canceled=true",
+		"cancel_stage=" + trace.CancelStageBeforeEnqueue,
+		"status=error",
+	} {
+		testutil.ExpectedContains(t, line, want)
+	}
+}
+
+// Error/timeout from the submitter: one attempt, coherent error response and no
+func TestPrintData_CUPSModeFailureHasNoFallback(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		wantMsg string
+	}{
+		{"rejection", errors.New("lp rejected the job"), "lp rejected the job"},
+		{"timeout", context.DeadlineExceeded, "context deadline exceeded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			connected := make(chan struct{}, 1)
+			var connections atomic.Int32
+			if _, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
+				connections.Add(1)
+				select {
+				case connected <- struct{}{}:
+				default:
+				}
+				_ = conn.Close()
+			}); err != nil {
+				t.Fatal(err)
+			}
+			traces := make(chan *trace.Trace, 1)
+			calls := 0
+			deps := handlerDeps{
+				submitCUPS: func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
+					calls++
+					return 0, tc.err
+				},
+				emitTrace: func(tr *trace.Trace) { traces <- tr },
+			}
+			s := testHandlerWithDeps(cupsPolicy(), deps)
+			id := printer.EncodeLANPrinterID("127.0.0.1")
+			req := httptest.NewRequest(http.MethodPost,
+				fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(cupsImageBody))
+			resp, err := testResponse(s, req)
+			testutil.ExpectedNoError(t, err)
+			body, err := io.ReadAll(resp.Body)
+			testutil.ExpectedNoError(t, err)
+			testutil.ExpectedContains(t, string(body), `success="false"`)
+			testutil.ExpectedContains(t, string(body), `EX_BADPORT`)
+			if calls != 1 {
+				t.Fatalf("a failed CUPS job must not be retried or fall back, got %d submissions", calls)
+			}
+			line := waitTrace(t, traces).Line()
+			testutil.ExpectedContains(t, line, "transport=cups")
+			testutil.ExpectedContains(t, line, "status=error")
+			testutil.ExpectedContains(t, line, tc.wantMsg)
+
+			// The trace is emitted after the handler returns. A fallback would
+			// dial the mock listener synchronously, so a bounded signal wait is a
+			// deterministic negative assertion (no time.Sleep).
+			select {
+			case <-connected:
+				t.Fatalf("CUPS failure fell back to direct ESC/POS (%d connection(s))", connections.Load())
+			case <-time.After(150 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// Cancellation after the submitter has started: the detached submission
+// finishes once, the trace records the after-write cancellation and nothing is
+// resent.
+func TestPrintData_CUPSModeCancelAfterSubmitStarted(t *testing.T) {
+	traces := make(chan *trace.Trace, 1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	calls := 0
+	deps := handlerDeps{
+		submitCUPS: func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
+			calls++
+			close(started)
+			<-release
+			return 42, nil
+		},
+		emitTrace: func(tr *trace.Trace) { traces <- tr },
+	}
+	s := testHandlerWithDeps(cupsPolicy(), deps)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(cupsImageBody)).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		_, _ = testResponse(s, req)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("submitter did not start")
+	}
+	cancel()
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not finish")
+	}
+
+	if calls != 1 {
+		t.Fatalf("expected exactly one submission, got %d", calls)
+	}
+	line := waitTrace(t, traces).Line()
+	for _, want := range []string{
+		"transport=cups",
+		"status=ok",
+		"client_canceled=true",
+		"cancel_stage=" + trace.CancelStageAfterWrite,
+	} {
+		testutil.ExpectedContains(t, line, want)
+	}
+}
+
+// A mixed/pulse job never calls the CUPS submitter and keeps the direct LAN
+// transport in the emitted trace.
+func TestPrintData_CUPSModeMixedJobKeepsDirectTransport(t *testing.T) {
+	if _, _, err := testutil.StartMockTCPServer(t, func(conn net.Conn) {
+		defer conn.Close()
+		data := make([]byte, 256)
+		_, _ = conn.Read(data)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	traces := make(chan *trace.Trace, 1)
+	calls := 0
+	deps := handlerDeps{
+		submitCUPS: func(context.Context, string, string, *escpos.CUPSImage) (int, error) {
+			calls++
+			return 1, nil
+		},
+		emitTrace: func(tr *trace.Trace) { traces <- tr },
+	}
+	s := testHandlerWithDeps(cupsPolicy(), deps)
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(`<epos-print><pulse /></epos-print>`))
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `success="true"`)
+	if calls != 0 {
+		t.Fatalf("a mixed/pulse job must not call CUPS, got %d", calls)
+	}
+	line := waitTrace(t, traces).Line()
+	testutil.ExpectedContains(t, line, "transport=lan")
+}
+
+// The production submitter keeps the macOS guard: outside macOS the real
+// cups.Submit path is still refused, without substituting the dependency.
+func TestPrintData_CUPSModeRealSubmitterRefusesOutsideDarwin(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("requires a non-macOS host")
+	}
+	s := testHandlerWithDeps(cupsPolicy(), handlerDeps{submitCUPS: cups.Submit, emitTrace: func(*trace.Trace) {}})
+	id := printer.EncodeLANPrinterID("127.0.0.1")
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/p/%s/cgi-bin/epos/service.cgi", id), bytes.NewBufferString(cupsImageBody))
+	resp, err := testResponse(s, req)
+	testutil.ExpectedNoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedContains(t, string(body), `success="false"`)
+	testutil.ExpectedContains(t, string(body), `EX_BADPORT`)
 }

@@ -1,22 +1,25 @@
 package printer
 
 import (
+	"context"
 	"errors"
-	"epos-proxy/internal/logger"
 	"fmt"
 	"sync"
+
+	"epos-proxy/internal/logger"
+	"epos-proxy/internal/trace"
 )
 
 const MaxCachedPrinters = 128
 
 var (
 	ErrLANPrinterNotAllowed = errors.New("LAN printer is not configured")
-	ErrPrinterCacheFull      = errors.New("printer cache limit reached")
+	ErrPrinterCacheFull     = errors.New("printer cache limit reached")
 )
 
 type Manager struct {
-	mu             sync.RWMutex
-	printers       map[string]*Printer
+	mu              sync.RWMutex
+	printers        map[string]*Printer
 	allowLANPrinter func(string) bool
 }
 
@@ -97,22 +100,71 @@ func (m *Manager) Get(id string) (*Printer, error) {
 }
 
 func (m *Manager) WriteAsync(printerID string, data []byte) (<-chan JobResult, error) {
+	return m.WriteAsyncContext(context.Background(), printerID, data, nil)
+}
+
+// WriteAsyncTraced queues a print job and attaches its per-ticket trace. A nil
+// trace keeps the historical behaviour: the bytes, the queue and the device
+// operations are identical either way.
+func (m *Manager) WriteAsyncTraced(printerID string, data []byte, tr *trace.Trace) (<-chan JobResult, error) {
+	return m.WriteAsyncContext(context.Background(), printerID, data, tr)
+}
+
+// WriteAsyncContext queues a print job bound to the request context.
+//
+// The context is consulted twice: when the printer loop is about to run the job
+// and again after the device connection is open, before the first byte. If the
+// client abandoned the request in either window the job is skipped and reports
+// ErrCanceled, because printing it would add an orphan ticket the POS already
+// reported as failed. Once the first write starts it is never interrupted, so a
+// job that reached the device always completes and reports its real result.
+//
+// No path in the manager re-sends a job on failure: a retry can only come from
+// a new client request.
+func (m *Manager) WriteAsyncContext(ctx context.Context, printerID string, data []byte, tr *trace.Trace) (<-chan JobResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if tr != nil {
+		tr.MarkEnqueue()
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if tr != nil {
+			tr.MarkClientCanceled(trace.CancelStageBeforeEnqueue)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrCanceled, ctxErr)
+	}
+
 	p, err := m.Get(printerID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get printer for ID %s: %w", printerID, err)
 	}
 
 	reply := make(chan JobResult, 1)
-	err = p.Enqueue(func(p *Printer) JobResult {
+	err = p.EnqueueTraced(func(p *Printer) JobResult {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if tr != nil {
+				tr.MarkClientCanceled(trace.CancelStageQueued)
+			}
+			logger.Warnf("Skipping queued print job for printer %s: client abandoned the request: %v", printerID, ctxErr)
+			return JobResult{Err: fmt.Errorf("%w: %v", ErrCanceled, ctxErr)}
+		}
+		if tr != nil {
+			tr.MarkJobStart()
+		}
 		logger.Debugf("Executing print job for printer %s", printerID)
-		if err := p.Write(data); err != nil {
+		if err := p.writeContext(ctx, data, tr); err != nil {
 			return JobResult{Err: fmt.Errorf("print job failed for printer %s: %w", printerID, err)}
 		}
 		logger.Debugf("Print job completed for printer %s", printerID)
 		return JobResult{OK: true}
-	}, reply)
+	}, reply, tr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to enqueue print job for printer %s: %w", printerID, err)
+	}
+	if tr != nil {
+		tr.MarkQueued()
 	}
 
 	return reply, nil

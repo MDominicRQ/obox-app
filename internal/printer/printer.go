@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
 
 	"epos-proxy/internal/logger"
+	"epos-proxy/internal/trace"
 
 	"github.com/google/gousb"
 )
@@ -24,12 +26,19 @@ const (
 const (
 	QueueSize    = 100
 	WriteTimeout = 5 * time.Second
-	ChunkSize    = 64 * 1024 // 8 KB
+	ChunkSize    = 64 * 1024 // USB transfer size only
+	// Bound each LAN write so slower printer buffers can keep making progress
+	// without imposing a single 5-second deadline on an entire large job.
+	lanWriteChunkSize = 32 * 1024
 )
 
 var (
 	ErrNotFound  = errors.New("printer not found")
 	ErrQueueFull = errors.New("printer queue is full")
+	// ErrCanceled reports a job dropped because the client canceled the request
+	// before the device write started. It is never returned once bytes have been
+	// sent to the device.
+	ErrCanceled = errors.New("print job canceled before the device write")
 )
 
 type JobResult struct {
@@ -42,6 +51,7 @@ type JobFunc func(p *Printer) JobResult
 type Job struct {
 	run   JobFunc
 	reply chan JobResult
+	trace *trace.Trace
 }
 
 // Printer owns a single device connection and serialises writes to it
@@ -59,7 +69,10 @@ type Printer struct {
 	outEndpoint *gousb.OutEndpoint
 	// LAN fields
 	tcpConn net.Conn
-	jobs    chan Job
+	// dial opens the LAN connection. It is nil in production, where
+	// net.DialTimeout is used; tests set it to simulate a slow device open.
+	dial func(address string, timeout time.Duration) (net.Conn, error)
+	jobs chan Job
 }
 
 func newPrinter(id string) (*Printer, error) {
@@ -95,7 +108,13 @@ func newPrinter(id string) (*Printer, error) {
 }
 
 func (p *Printer) Enqueue(fn JobFunc, reply chan JobResult) error {
-	j := Job{run: fn, reply: reply}
+	return p.EnqueueTraced(fn, reply, nil)
+}
+
+// EnqueueTraced queues a job and attaches its per-ticket trace. A nil trace
+// keeps the historical behaviour.
+func (p *Printer) EnqueueTraced(fn JobFunc, reply chan JobResult, tr *trace.Trace) error {
+	j := Job{run: fn, reply: reply, trace: tr}
 	select {
 	case p.jobs <- j:
 		logger.Debugf("Enqueued print job for printer %s", p.idToString())
@@ -106,45 +125,151 @@ func (p *Printer) Enqueue(fn JobFunc, reply chan JobResult) error {
 	}
 }
 
+// Write sends the job to the device without a trace. Callers that need
+// timings use the manager, which passes a trace down to write.
 func (p *Printer) Write(data []byte) error {
+	return p.write(data, nil)
+}
+
+// write is writeContext for callers that have no request to cancel.
+func (p *Printer) write(data []byte, tr *trace.Trace) error {
+	return p.writeContext(context.Background(), data, tr)
+}
+
+func (p *Printer) writeContext(ctx context.Context, data []byte, tr *trace.Trace) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.ensureOpen(); err != nil {
-		return err
+
+	reused := p.deviceOpenLocked()
+	openStarted := time.Now()
+	openErr := p.ensureOpen()
+	if tr != nil {
+		tr.MarkOpen(time.Since(openStarted), reused)
+	}
+	// The job was accepted by the queue before the open began, so the client can
+	// give up while a LAN dial or a USB enumeration/claim is still running.
+	// Nothing has reached the device at this point: dropping the ticket and
+	// closing the connection is safer than printing one the POS already reported
+	// as failed. After the first Write below, cancellation is never observed
+	// again: a ticket that started reaching the device always completes.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if tr != nil {
+			tr.MarkClientCanceled(trace.CancelStageOpening)
+		}
+		p.closeDeviceTraced(tr)
+		return fmt.Errorf("%w: %v", ErrCanceled, ctxErr)
+	}
+	if openErr != nil {
+		return openErr
 	}
 
 	logger.Debugf("Writing %d bytes to printer %s", len(data), p.idToString())
 
 	if p.connectionType == ConnKindLAN {
-		if err := p.tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
-			p.closeDeviceLocked()
-			return fmt.Errorf("failed to set write deadline for LAN printer %s: %w", p.idToString(), err)
+		// TCP is a byte stream: splitting writes does not alter ESC/POS data.
+		// Refresh the deadline for each chunk instead of timing out a large
+		// receipt while a slower printer drains its receive buffer.
+		totalBytes := len(data)
+		written := 0
+		writeStarted := time.Now()
+		for len(data) > 0 {
+			size := min(len(data), lanWriteChunkSize)
+			if err := p.tcpConn.SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil {
+				if tr != nil {
+					tr.SetWrite(time.Since(writeStarted), totalBytes, written)
+				}
+				p.closeDeviceTraced(tr)
+				return fmt.Errorf("failed to set write deadline for LAN printer %s: %w", p.idToString(), err)
+			}
+
+			blockStarted := time.Now()
+			n, err := p.tcpConn.Write(data[:size])
+			blockDur := time.Since(blockStarted)
+
+			written += n
+			if tr != nil {
+				tr.AddWriteBlock(blockDur)
+			}
+
+			if err != nil {
+				if tr != nil {
+					tr.SetWrite(time.Since(writeStarted), totalBytes, written)
+				}
+				p.closeDeviceTraced(tr)
+				return fmt.Errorf("failed to write to LAN printer %s: %w", p.idToString(), err)
+			}
+			if n <= 0 || n > size {
+				if tr != nil {
+					tr.SetWrite(time.Since(writeStarted), totalBytes, written)
+				}
+				p.closeDeviceTraced(tr)
+				return fmt.Errorf("failed to write to LAN printer %s: %w", p.idToString(), io.ErrShortWrite)
+			}
+			data = data[n:]
 		}
-		if _, err := p.tcpConn.Write(data); err != nil {
-			p.closeDeviceLocked()
-			return fmt.Errorf("failed to write to LAN printer %s: %w", p.idToString(), err)
+		if tr != nil {
+			tr.SetWrite(time.Since(writeStarted), totalBytes, written)
 		}
 		logger.Debugf("Successfully wrote to LAN printer %s", p.idToString())
 		return nil
 	}
 
 	// USB write
+	totalBytes := len(data)
+	written := 0
+	writeStarted := time.Now()
 	for len(data) > 0 {
 		size := min(len(data), ChunkSize)
 		logger.Debugf("USB printer %s writing %d bytes", p.idToString(), size)
 
 		ctx, cancel := context.WithTimeout(context.Background(), WriteTimeout)
-		_, err := p.outEndpoint.WriteContext(ctx, data[:size])
+		blockStarted := time.Now()
+		n, err := p.outEndpoint.WriteContext(ctx, data[:size])
+		blockDur := time.Since(blockStarted)
 		cancel()
 
+		written += n
+		if tr != nil {
+			tr.AddWriteBlock(blockDur)
+		}
+
 		if err != nil {
-			p.closeDeviceLocked()
+			if tr != nil {
+				tr.SetWrite(time.Since(writeStarted), totalBytes, written)
+			}
+			p.closeDeviceTraced(tr)
 			return fmt.Errorf("failed to write %d bytes to USB printer %s: %w", size, p.idToString(), err)
 		}
 
 		data = data[size:]
 	}
+	if tr != nil {
+		tr.SetWrite(time.Since(writeStarted), totalBytes, written)
+	}
 	return nil
+}
+
+func (p *Printer) deviceOpenLocked() bool {
+	if p.connectionType == ConnKindLAN {
+		return p.tcpConn != nil
+	}
+	return p.device != nil
+}
+
+// closeDeviceTraced closes the device and records the time it took. It must be
+// called with p.mu held, like closeDeviceLocked.
+func (p *Printer) closeDeviceTraced(tr *trace.Trace) {
+	if tr == nil {
+		p.closeDeviceLocked()
+		return
+	}
+	started := time.Now()
+	p.closeDeviceLocked()
+	tr.AddClose(time.Since(started))
 }
 
 func (p *Printer) loop() {
@@ -155,8 +280,21 @@ func (p *Printer) loop() {
 			j.reply <- result
 			close(j.reply)
 		}
+		var (
+			closeDur time.Duration
+			closed   bool
+		)
 		if len(p.jobs) == 0 {
+			started := time.Now()
 			p.close()
+			closeDur = time.Since(started)
+			closed = true
+		}
+		if j.trace != nil {
+			if closed {
+				j.trace.MarkIdleClose(closeDur)
+			}
+			j.trace.Finish()
 		}
 	}
 }
@@ -175,7 +313,13 @@ func (p *Printer) ensureOpenLANLocked() error {
 
 	addr := net.JoinHostPort(p.lanIP, fmt.Sprintf("%d", LANPort))
 	logger.Debugf("Attempting to connect to LAN printer %s at %s", p.idToString(), addr)
-	conn, err := net.DialTimeout("tcp", addr, LANConnectTimeout)
+	dial := p.dial
+	if dial == nil {
+		dial = func(address string, timeout time.Duration) (net.Conn, error) {
+			return net.DialTimeout("tcp", address, timeout)
+		}
+	}
+	conn, err := dial(addr, LANConnectTimeout)
 	if err != nil {
 		logger.Errorf("Failed to connect to LAN printer %s at %s: %v", p.idToString(), addr, err)
 		return fmt.Errorf("failed to connect to LAN printer at %s: %w", addr, err)

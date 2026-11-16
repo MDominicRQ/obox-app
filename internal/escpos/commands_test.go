@@ -1,6 +1,7 @@
 package escpos
 
 import (
+	"bytes"
 	"encoding/base64"
 	"testing"
 
@@ -314,7 +315,7 @@ func TestBuildImage_DataHandling(t *testing.T) {
 	}
 	testutil.ExpectedBytesEqual(t, got, expectedPrefix)
 
-	// Image data larger than one slice is split into multiple chunks.
+	// A 300-row image now fits in one raster command.
 	bitmap = make([]byte, 300)
 	for i := range bitmap {
 		bitmap[i] = byte(i % 256)
@@ -323,13 +324,40 @@ func TestBuildImage_DataHandling(t *testing.T) {
 
 	got, err = BuildImage(b64, ImageAttrs{Width: 8, Height: 300})
 	testutil.ExpectedNoError(t, err)
-	testutil.ExpectedLen(t, got, 316)
+	testutil.ExpectedLen(t, got, 8+len(bitmap))
+	testutil.ExpectedBytesEqual(t, got[:8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0x2C, 0x01})
+	testutil.ExpectedBytesEqual(t, got[8:], bitmap)
+}
 
-	// Verify Chunk 1 header
-	testutil.ExpectedBytesEqual(t, got[:8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0xFF, 0x00})
+// Verify that larger images preserve all bytes across raster command boundaries.
+func TestBuildImage_SplitsAtConfiguredHeight(t *testing.T) {
+	const bytesPerRow = 2
+	height := maxImgSliceHeight + 1
+	bitmap := make([]byte, height*bytesPerRow)
+	for i := range bitmap {
+		bitmap[i] = byte(i % 251)
+	}
 
-	// Verify Chunk 2 header (0x2D = 45)
-	testutil.ExpectedBytesEqual(t, got[263:263+8], []byte{GS, 0x76, 0x30, 0x00, 0x01, 0x00, 0x2D, 0x00})
+	got, err := BuildImage(base64.StdEncoding.EncodeToString(bitmap), ImageAttrs{
+		Width:  16,
+		Height: height,
+	})
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedLen(t, got, len(bitmap)+16)
+
+	firstDataEnd := 8 + maxImgSliceHeight*bytesPerRow
+	testutil.ExpectedBytesEqual(t, got[:8], []byte{
+		GS, 0x76, 0x30, 0x00,
+		bytesPerRow, 0x00,
+		byte(maxImgSliceHeight & 0xFF), byte(maxImgSliceHeight >> 8),
+	})
+	testutil.ExpectedBytesEqual(t, got[8:firstDataEnd], bitmap[:maxImgSliceHeight*bytesPerRow])
+	testutil.ExpectedBytesEqual(t, got[firstDataEnd:firstDataEnd+8], []byte{
+		GS, 0x76, 0x30, 0x00,
+		bytesPerRow, 0x00,
+		0x01, 0x00,
+	})
+	testutil.ExpectedBytesEqual(t, got[firstDataEnd+8:], bitmap[maxImgSliceHeight*bytesPerRow:])
 }
 
 func TestBuildImage_RejectsUnsafeDimensions(t *testing.T) {
@@ -346,5 +374,275 @@ func TestBuildImage_RejectsUnsafeDimensions(t *testing.T) {
 		if _, err := BuildImage("AA==", attrs); err == nil {
 			t.Fatalf("expected unsafe image dimensions to be rejected: %+v", attrs)
 		}
+	}
+}
+
+// Verify Epson's GS ( L function 112 store / function 50 print byte layout.
+func TestBuildImage_EpsonGraphicsExactBytes(t *testing.T) {
+	bitmap := []byte{0xFF, 0x00, 0xAA, 0x55}
+	got, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(bitmap), ImageAttrs{
+		Align: "center", Width: 16, Height: 2,
+	}, ImageModeEpsonGraphics)
+	testutil.ExpectedNoError(t, err)
+
+	expected := []byte{
+		ESC, 0x61, 0x01,
+		GS, 0x28, 0x4C, 0x0E, 0x00, // pL/pH = 10 + 4 image bytes
+		0x30, 0x70, 0x30, 0x01, 0x01, 0x31, // fn=112, 1:1 monochrome, color 1
+		0x10, 0x00, 0x02, 0x00, // 16 x 2 dots
+		0xFF, 0x00, 0xAA, 0x55,
+		GS, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32, // fn=50 print
+	}
+	testutil.ExpectedBytesEqual(t, got, expected)
+}
+
+// Chunks must print all original raster rows exactly once and in order.
+func TestBuildImage_EpsonGraphicsAcrossSlices(t *testing.T) {
+	const rows = epsonGraphicsSliceHeight + 1
+	bitmap := make([]byte, rows)
+	for i := range bitmap {
+		bitmap[i] = byte(i % 251)
+	}
+	got, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(bitmap),
+		ImageAttrs{Width: 8, Height: rows}, ImageModeEpsonGraphics)
+	testutil.ExpectedNoError(t, err)
+	testutil.ExpectedLen(t, got, len(bitmap)+2*(15+7))
+
+	expectedFirst := []byte{GS, 0x28, 0x4C, 0xCA, 0x00,
+		0x30, 0x70, 0x30, 0x01, 0x01, 0x31, 0x08, 0x00, 0xC0, 0x00}
+	testutil.ExpectedBytesEqual(t, got[:15], expectedFirst)
+	firstEnd := 15 + epsonGraphicsSliceHeight
+	testutil.ExpectedBytesEqual(t, got[15:firstEnd], bitmap[:epsonGraphicsSliceHeight])
+	testutil.ExpectedBytesEqual(t, got[firstEnd:firstEnd+7],
+		[]byte{GS, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32})
+	second := firstEnd + 7
+	testutil.ExpectedBytesEqual(t, got[second:second+15], []byte{
+		GS, 0x28, 0x4C, 0x0B, 0x00, 0x30, 0x70, 0x30, 0x01,
+		0x01, 0x31, 0x08, 0x00, 0x01, 0x00,
+	})
+	testutil.ExpectedBytesEqual(t, got[second+15:second+16], bitmap[epsonGraphicsSliceHeight:])
+	testutil.ExpectedBytesEqual(t, got[second+16:],
+		[]byte{GS, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32})
+}
+
+// Wide graphics must reduce slice height to fit the 16-bit GS ( L length.
+func TestBuildImage_EpsonGraphicsPayloadSizeLimit(t *testing.T) {
+	const width = 64000
+	const height = 9
+	raw := make([]byte, (width/8)*height)
+	for i := range raw {
+		raw[i] = byte(i % 251)
+	}
+	got, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(raw),
+		ImageAttrs{Width: width, Height: height}, ImageModeEpsonGraphics)
+	testutil.ExpectedNoError(t, err)
+
+	const firstRows = 8 // floor((65535 - 10) / (width / 8))
+	const firstData = firstRows * (width / 8)
+	second := 15 + firstData + 7
+	testutil.ExpectedLen(t, got, len(raw)+2*(15+7))
+	firstPayloadSize := int(got[3]) | int(got[4])<<8
+	if firstPayloadSize != firstData+10 || firstPayloadSize > 65535 {
+		t.Fatalf("invalid first GS ( L payload size %d", firstPayloadSize)
+	}
+	testutil.ExpectedBytesEqual(t, got[15:15+firstData], raw[:firstData])
+	testutil.ExpectedBytesEqual(t, got[second+15:second+15+width/8], raw[firstData:])
+}
+
+// The declared GS ( L width is in dots, while image rows are padded to whole
+// bytes. Firmware derives the expected data length from (x / 8) * y, so a
+// non byte-aligned width must be declared padded to keep the payload valid.
+func TestBuildImage_EpsonGraphicsPadsDeclaredWidth(t *testing.T) {
+	const width = 12 // 2 data bytes per row, 4 padding dots
+	const height = 3
+	bitmap := []byte{0xF0, 0x00, 0x0F, 0xF0, 0xAA, 0x00}
+	got, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(bitmap),
+		ImageAttrs{Width: width, Height: height}, ImageModeEpsonGraphics)
+	testutil.ExpectedNoError(t, err)
+
+	expected := []byte{
+		GS, 0x28, 0x4C, 0x10, 0x00, // pL/pH = 10 + 6 image bytes
+		0x30, 0x70, 0x30, 0x01, 0x01, 0x31,
+		0x10, 0x00, 0x03, 0x00, // padded 16 x 3 dots, not 12 x 3
+	}
+	expected = append(expected, bitmap...)
+	expected = append(expected, GS, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32)
+	testutil.ExpectedBytesEqual(t, got, expected)
+}
+
+// A row wider than 8191 bytes cannot be described by the 16-bit dot width once
+// padded, so the Epson path must reject it instead of overflowing xL/xH.
+func TestBuildImage_EpsonGraphicsRejectsWidthBeyondDotField(t *testing.T) {
+	const width = 65529 // ceil(65529/8) = 8192 bytes -> 65536 padded dots
+	raw := make([]byte, (width+7)/8)
+	if _, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(raw),
+		ImageAttrs{Width: width, Height: 1}, ImageModeEpsonGraphics); err == nil {
+		t.Fatal("expected GS ( L width overflow to be rejected")
+	}
+	// Legacy GS v 0 declares width in bytes, so it still accepts this row.
+	if _, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(raw),
+		ImageAttrs{Width: width, Height: 1}, ImageModeLegacy); err != nil {
+		t.Fatalf("legacy raster should accept a 16-bit byte width: %v", err)
+	}
+}
+
+func TestBuildImage_EpsonGraphicsRejectsUnsafeModesAndWidth(t *testing.T) {
+	_, err := BuildImageWithMode("AA==", ImageAttrs{Width: 8, Height: 1}, ImageMode("unknown"))
+	testutil.ExpectedError(t, err)
+	_, err = BuildImageWithMode("AA==", ImageAttrs{Width: 65536, Height: 1}, ImageModeEpsonGraphics)
+	testutil.ExpectedError(t, err)
+}
+
+type epsonGraphicsBlock struct {
+	width   int
+	height  int
+	payload []byte
+}
+
+// parseEpsonGraphicsBlocks validates the GS ( L header fields (pL/pH, padded
+// dot width, block height), the exact payload length and the fn=50 terminator.
+func parseEpsonGraphicsBlocks(t *testing.T, data []byte) []epsonGraphicsBlock {
+	t.Helper()
+	var blocks []epsonGraphicsBlock
+	for pos := 0; pos < len(data); {
+		if len(data)-pos < 15 {
+			t.Fatalf("truncated GS ( L header at %d", pos)
+		}
+		if !bytes.Equal(data[pos:pos+3], []byte{GS, 0x28, 0x4C}) {
+			t.Fatalf("missing GS ( L store signature at %d", pos)
+		}
+		size := int(data[pos+3]) | int(data[pos+4])<<8
+		header := []byte{0x30, 0x70, 0x30, 0x01, 0x01, 0x31}
+		if !bytes.Equal(data[pos+5:pos+11], header) {
+			t.Fatalf("unexpected GS ( L function/parameter bytes at %d: % x", pos, data[pos+5:pos+11])
+		}
+		width := int(data[pos+11]) | int(data[pos+12])<<8
+		height := int(data[pos+13]) | int(data[pos+14])<<8
+		end := pos + 5 + size
+		if size < 10 || end > len(data) {
+			t.Fatalf("invalid pL/pH=%d at %d (block end %d, total %d)", size, pos, end, len(data))
+		}
+		payload := data[pos+15 : end]
+		if width%8 != 0 || len(payload) != height*(width/8) {
+			t.Fatalf("block mismatch: width=%d height=%d payload=%d", width, height, len(payload))
+		}
+		blocks = append(blocks, epsonGraphicsBlock{width: width, height: height, payload: payload})
+		pos = end
+		if len(data)-pos < 7 || !bytes.Equal(data[pos:pos+7], []byte{GS, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32}) {
+			t.Fatalf("missing GS ( L fn=50 print terminator after block at %d", pos)
+		}
+		pos += 7
+	}
+	return blocks
+}
+
+// The 16-bit dot field boundary: 65528 dots is accepted, 65536 is rejected in
+// GS ( L but remains valid for legacy, whose field is in bytes. Acceptance is
+// a protocol limit, not evidence that any printer supports that width.
+func TestBuildImage_EpsonGraphicsDotFieldBoundary(t *testing.T) {
+	const maxWidth = 65528
+	raw := make([]byte, maxWidth/8)
+	for i := range raw {
+		raw[i] = byte((i*29 + 7) % 256)
+	}
+	got, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(raw),
+		ImageAttrs{Width: maxWidth, Height: 1}, ImageModeEpsonGraphics)
+	testutil.ExpectedNoError(t, err)
+	blocks := parseEpsonGraphicsBlocks(t, got)
+	if len(blocks) != 1 {
+		t.Fatalf("expected one block, got %d", len(blocks))
+	}
+	if blocks[0].width != maxWidth || blocks[0].height != 1 {
+		t.Fatalf("unexpected boundary header: %+v", blocks[0])
+	}
+	testutil.ExpectedBytesEqual(t, blocks[0].payload, raw)
+
+	const tooWide = 65536 // 8192 bytes -> padded width overflows the dot field
+	rawTooWide := make([]byte, tooWide/8)
+	if _, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(rawTooWide),
+		ImageAttrs{Width: tooWide, Height: 1}, ImageModeEpsonGraphics); err == nil {
+		t.Fatal("65536-dot GS ( L width must be rejected")
+	}
+	if _, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(rawTooWide),
+		ImageAttrs{Width: tooWide, Height: 1}, ImageModeLegacy); err != nil {
+		t.Fatalf("legacy must keep accepting a byte-sized 16-bit width: %v", err)
+	}
+
+	// 65520 is a near-maximum row that still fits the 16-bit dot field.
+	const nearWidth = 65520
+	rawNear := make([]byte, nearWidth/8)
+	gotNear, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(rawNear),
+		ImageAttrs{Width: nearWidth, Height: 1}, ImageModeEpsonGraphics)
+	testutil.ExpectedNoError(t, err)
+	nearBlocks := parseEpsonGraphicsBlocks(t, gotNear)
+	if len(nearBlocks) != 1 || nearBlocks[0].width != nearWidth {
+		t.Fatalf("unexpected near-maximum header: %+v", nearBlocks)
+	}
+	testutil.ExpectedBytesEqual(t, nearBlocks[0].payload, rawNear)
+
+	// 65535 pads to 65536 dots, so it must be rejected like 65529.
+	const paddedOverflow = 65535
+	rawOverflow := make([]byte, (paddedOverflow+7)/8)
+	if _, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(rawOverflow),
+		ImageAttrs{Width: paddedOverflow, Height: 1}, ImageModeEpsonGraphics); err == nil {
+		t.Fatal("65535-dot GS ( L width must be rejected after padding")
+	}
+
+	// Legacy keeps the byte-sized x field for every wide row.
+	for _, width := range []int{65529, 65535, 65536} {
+		row := make([]byte, (width+7)/8)
+		out, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(row),
+			ImageAttrs{Width: width, Height: 1}, ImageModeLegacy)
+		if err != nil {
+			t.Fatalf("legacy must accept width %d: %v", width, err)
+		}
+		bytesPerRow := (width + 7) / 8
+		if len(out) != 8+bytesPerRow {
+			t.Fatalf("legacy width %d: len=%d want %d", width, len(out), 8+bytesPerRow)
+		}
+		if got := int(out[4]) | int(out[5])<<8; got != bytesPerRow {
+			t.Fatalf("legacy width %d: xL/xH=%d want %d", width, got, bytesPerRow)
+		}
+	}
+}
+
+// Non-byte-aligned widths, aligned widths and payload-limited heights must
+// declare the padded width and reconstruct every source row exactly.
+func TestBuildImage_EpsonGraphicsMultipleSlicesReconstructExactly(t *testing.T) {
+	cases := []struct {
+		width, height int
+		wantHeights   []int
+	}{
+		{12, 385, []int{192, 192, 1}},
+		{13, 1, []int{1}},
+		{100, 385, []int{192, 192, 1}},
+		{576, 385, []int{192, 192, 1}},
+		{65528, 15, []int{7, 7, 1}}, // payload size limits rows to 7 per block
+	}
+	for _, tc := range cases {
+		stride := (tc.width + 7) / 8
+		raw := make([]byte, stride*tc.height)
+		for i := range raw {
+			raw[i] = byte((i*53 + 17) % 256)
+		}
+		got, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(raw),
+			ImageAttrs{Width: tc.width, Height: tc.height}, ImageModeEpsonGraphics)
+		testutil.ExpectedNoError(t, err)
+
+		blocks := parseEpsonGraphicsBlocks(t, got)
+		if len(blocks) != len(tc.wantHeights) {
+			t.Fatalf("%dx%d: expected %d blocks, got %d", tc.width, tc.height, len(tc.wantHeights), len(blocks))
+		}
+		var rebuilt []byte
+		for i, block := range blocks {
+			if block.width != stride*8 {
+				t.Fatalf("%dx%d: block %d padded width = %d, want %d", tc.width, tc.height, i, block.width, stride*8)
+			}
+			if block.height != tc.wantHeights[i] {
+				t.Fatalf("%dx%d: block %d height = %d, want %d", tc.width, tc.height, i, block.height, tc.wantHeights[i])
+			}
+			rebuilt = append(rebuilt, block.payload...)
+		}
+		testutil.ExpectedBytesEqual(t, rebuilt, raw)
 	}
 }

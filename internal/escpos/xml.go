@@ -96,6 +96,15 @@ func parseEPOSPrintFragment(fragment string) ([]xmlRawItem, error) {
 }
 
 func ParseXML(body []byte) ([]byte, error) {
+	return ParseXMLWithMode(body, ImageModeLegacy)
+}
+
+// ParseXMLWithMode uses buffered Epson graphics when selected for a LAN printer.
+// Every non-image command is identical across modes, including cut and pulse.
+func ParseXMLWithMode(body []byte, imageMode ImageMode) ([]byte, error) {
+	if imageMode != ImageModeLegacy && imageMode != ImageModeEpsonGraphics {
+		return nil, fmt.Errorf("unsupported image mode %q", imageMode)
+	}
 	s := string(body)
 	start := strings.Index(s, "<epos-print")
 	end := strings.LastIndex(s, "</epos-print>")
@@ -144,7 +153,7 @@ func ParseXML(body []byte) ([]byte, error) {
 				Width:  parseInt(attrs["width"], 0),
 				Height: parseInt(attrs["height"], 0),
 			}
-			imgCmd, err := BuildImage(strings.TrimSpace(item.Content), imgAttrs)
+			imgCmd, err := BuildImageWithMode(strings.TrimSpace(item.Content), imgAttrs, imageMode)
 			if err != nil {
 				return nil, fmt.Errorf("image element: %w", err)
 			}
