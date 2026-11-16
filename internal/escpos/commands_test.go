@@ -448,6 +448,43 @@ func TestBuildImage_EpsonGraphicsPayloadSizeLimit(t *testing.T) {
 	testutil.ExpectedBytesEqual(t, got[second+15:second+15+width/8], raw[firstData:])
 }
 
+// The declared GS ( L width is in dots, while image rows are padded to whole
+// bytes. Firmware derives the expected data length from (x / 8) * y, so a
+// non byte-aligned width must be declared padded to keep the payload valid.
+func TestBuildImage_EpsonGraphicsPadsDeclaredWidth(t *testing.T) {
+	const width = 12 // 2 data bytes per row, 4 padding dots
+	const height = 3
+	bitmap := []byte{0xF0, 0x00, 0x0F, 0xF0, 0xAA, 0x00}
+	got, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(bitmap),
+		ImageAttrs{Width: width, Height: height}, ImageModeEpsonGraphics)
+	testutil.ExpectedNoError(t, err)
+
+	expected := []byte{
+		GS, 0x28, 0x4C, 0x10, 0x00, // pL/pH = 10 + 6 image bytes
+		0x30, 0x70, 0x30, 0x01, 0x01, 0x31,
+		0x10, 0x00, 0x03, 0x00, // padded 16 x 3 dots, not 12 x 3
+	}
+	expected = append(expected, bitmap...)
+	expected = append(expected, GS, 0x28, 0x4C, 0x02, 0x00, 0x30, 0x32)
+	testutil.ExpectedBytesEqual(t, got, expected)
+}
+
+// A row wider than 8191 bytes cannot be described by the 16-bit dot width once
+// padded, so the Epson path must reject it instead of overflowing xL/xH.
+func TestBuildImage_EpsonGraphicsRejectsWidthBeyondDotField(t *testing.T) {
+	const width = 65529 // ceil(65529/8) = 8192 bytes -> 65536 padded dots
+	raw := make([]byte, (width+7)/8)
+	if _, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(raw),
+		ImageAttrs{Width: width, Height: 1}, ImageModeEpsonGraphics); err == nil {
+		t.Fatal("expected GS ( L width overflow to be rejected")
+	}
+	// Legacy GS v 0 declares width in bytes, so it still accepts this row.
+	if _, err := BuildImageWithMode(base64.StdEncoding.EncodeToString(raw),
+		ImageAttrs{Width: width, Height: 1}, ImageModeLegacy); err != nil {
+		t.Fatalf("legacy raster should accept a 16-bit byte width: %v", err)
+	}
+}
+
 func TestBuildImage_EpsonGraphicsRejectsUnsafeModesAndWidth(t *testing.T) {
 	_, err := BuildImageWithMode("AA==", ImageAttrs{Width: 8, Height: 1}, ImageMode("unknown"))
 	testutil.ExpectedError(t, err)
