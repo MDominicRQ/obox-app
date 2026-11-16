@@ -13,10 +13,14 @@ const (
 	maxImgSliceHeight = 2048
 	maxImageBytes     = 4 * 1024 * 1024
 
-	// Epson recommends roughly 59-246 raster rows per graphics transfer
-	// for good throughput. Keep every GS ( L payload below its 16-bit size.
+	// A modest number of rows per GS ( L transfer keeps each payload small and
+	// leaves room for the 16-bit pL/pH size. The best value is firmware
+	// dependent and still has to be confirmed on real hardware.
 	epsonGraphicsSliceHeight  = 192
 	epsonGraphicsMaxDataBytes = 65535 - 10
+	// GS ( L declares the horizontal size in dots with a 16-bit field, so the
+	// padded row width must stay within 65528 dots (8191 bytes).
+	epsonGraphicsMaxBytesPerRow = 65528 / 8
 )
 
 type ImageMode string
@@ -197,8 +201,8 @@ func BuildImageWithMode(b64data string, a ImageAttrs, mode ImageMode) ([]byte, e
 	if bytesPerRow <= 0 || bytesPerRow > 65535 || a.Height > maxImageBytes/bytesPerRow {
 		return nil, fmt.Errorf("image dimensions exceed ESC/POS limits")
 	}
-	if mode == ImageModeEpsonGraphics && (a.Width > 65535 || bytesPerRow > epsonGraphicsMaxDataBytes) {
-		return nil, fmt.Errorf("image dimensions exceed safe limits")
+	if mode == ImageModeEpsonGraphics && bytesPerRow > epsonGraphicsMaxBytesPerRow {
+		return nil, fmt.Errorf("image width exceeds GS ( L limits")
 	}
 	expectedLen := bytesPerRow * a.Height
 	if expectedLen > maxImageBytes {
@@ -233,6 +237,9 @@ func BuildImageWithMode(b64data string, a ImageAttrs, mode ImageMode) ([]byte, e
 	}
 
 	if mode == ImageModeEpsonGraphics {
+		// Rows are padded to whole bytes, so the declared horizontal size must
+		// also be padded: firmware derives the data length from (x / 8) * y.
+		paddedWidth := bytesPerRow * 8
 		maxRows := min(epsonGraphicsSliceHeight, epsonGraphicsMaxDataBytes/bytesPerRow)
 		for top := 0; top < a.Height; top += maxRows {
 			h := min(a.Height-top, maxRows)
@@ -243,7 +250,7 @@ func BuildImageWithMode(b64data string, a ImageAttrs, mode ImageMode) ([]byte, e
 			b = append(b, GS, 0x28, 0x4C,
 				byte(size), byte(size>>8), 0x30, 0x70, 0x30,
 				0x01, 0x01, 0x31,
-				byte(a.Width), byte(a.Width>>8), byte(h), byte(h>>8))
+				byte(paddedWidth), byte(paddedWidth>>8), byte(h), byte(h>>8))
 			b = append(b, raw[start:start+h*bytesPerRow]...)
 
 			// GS ( L fn=50: print stored graphics and advance to next line.
