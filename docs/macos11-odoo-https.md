@@ -2,6 +2,8 @@
 
 ePOS Proxy exposes both HTTP and HTTPS while keeping the actual USB/LAN printer path unchanged.
 
+See [Printing modes, benchmark and rollout](printing-modes.md) for the canonical decision tree, the `legacy` / `GS ( L` / CUPS selection, rollback and known limitations. This page covers the app-specific addresses, listeners and certificate storage.
+
 - **HTTP / LNA** is the recommended path for Odoo 19 on current Chromium browsers.
 - **HTTPS / Legacy** remains available for older macOS/browser combinations.
 - Closing the application window does **not** stop the proxy. The window is hidden and the HTTP/HTTPS listeners continue running in the background.
